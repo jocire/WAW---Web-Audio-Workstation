@@ -1,0 +1,40 @@
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Code Editors & IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Node / Build Tools (if you add npm or bundlers later)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+build/
+.cache/
+
+# Local Audio / Scratch Files (optional, if you test with large local assets)
+*.wav
+*.mp3
+*.aiff
+!assets/demo/*.wav
+!assets/demo/*.mp3
+!assets/demo/*.aiff

@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WAW</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%8E%B9%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <div class="header-left">
+    <h1 class="title">WAW</h1>     
+    <span>   
+     <label class="bpm-label">
+      BPM
+      <input type="number" id="bpmInput" value="120" min="30" max="240">
+    </label>
+    </span>
+    <div class="metro-row">
+      <input type="checkbox" id="metroToggle" hidden>
+      <label for="metroToggle" id="metroToggleBtn" class="metro-btn">Metronome </label>
+    </div>
+    <div class="view-switch">
+      <button id="goSequencerBtn">Sequencer</button>
+      <button id="goMixerBtn">Mixer</button>
+      <button id="goProjectsBtn">Projects</button>
+      <button id="goEditorBtn" class="hidden">Editor</button>
+    </div>
+
+    <button id="addTrackBtn"
+      title="Alt+N = new track, Alt+1..9 switch">
+      + Track
+    </button>
+
+  </div>
+
+  <div class="header-right">
+    <button type="button" id="playBtn">▶ Play</button>
+    <button type="button" id="stopBtn" disabled>⏹ Stop</button>  
+    <button type="button" id="startRecBtn">⏺ Record</button>
+    <button id="loopBtn" class="toolbar-toggle active" type="button">Loop</button>
+    <!--<button id="overdubBtn" class="toolbar-toggle" type="button">Overdub</button>-->
+    <button id="overwriteBtn"
+        class="toolbar-toggle"
+        type="button"
+        title="When ON, new recording replaces notes inside the current loop. When OFF, it overdubs.">
+      Overwrite
+    </button>
+    <button type="button" id="exportBtn">💾 MIDI</button>
+    <button type="button" id="exportAudioBtn">WAV</button>
+    <button type="button" id="saveProjectBtn">Save</button>
+    <button type="button" id="loadProjectBtn">Load</button>
+    <input type="file" id="loadProjectInput" class="hidden" accept="application/json,.json">
+    <button type="button" id="appSettingsBtn" class="icon-btn" title="Settings">⚙</button>    
+  </div>
+</header>
+
+<div class="app">
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <!-- Tracks / Mixer -->
+    <div class="panel" data-sidebar-for="sequencer,editor,mixer" id="panelTracks">
+      <div class="panel-header">
+        <h2>Tracks</h2>
+        <span class="panel-toggle">▼</span>
+      </div>
+      <div class="panel-body">
+        <div id="tracksContainer" class="tracks-container">
+          <!-- app.js will render track rows here -->
+        </div>
+      </div>
+    </div> <!-- End Tracks Panel-->  
+
+    <!-- Key & Scale -->
+    <div class="panel" data-sidebar-for="editor" id="panelCircle">
+      <div class="panel-header">
+        <h2>Key & Scale</h2>
+        <span class="panel-toggle">▼</span>
+      </div>
+      <div class="panel-body">
+        <div class="circle-shell">
+          <canvas id="circleCanvas"></canvas>
+          <select id="scaleSelectCircle" class="circle-scale-select" title="Scale selection">
+            <option value="major">Major</option>
+            <option value="minor">Natural Minor</option>
+            <option value="pent">Minor Pentatonic</option>
+          </select>
+        </div>
+        <div class="scale-info">
+          <div class="scale-row">
+            <div class="scale-label">Scale notes</div>
+            <div class="scale-notes" id="scaleNotes"></div>
+          </div>
+          <div class="scale-row">
+            <div class="scale-label">Chord presets</div>
+            <div class="scale-chords" id="scaleChords"></div>
+          </div> 
+          <div class="scale-row">
+            <div class="scale-label">Voicing</div>
+            <div class="voicing-controls" id="voicingControls">
+              <button type="button" id="invBtn">Inv: Root</button>
+
+              <div class="octave-controls">
+                <button type="button" data-tone="0" data-dir="-1">R↓</button>
+                <button type="button" data-tone="0" data-dir="1">R↑</button>
+
+                <button type="button" data-tone="1" data-dir="-1">3↓</button>
+                <button type="button" data-tone="1" data-dir="1">3↑</button>
+
+                <button type="button" data-tone="2" data-dir="-1">5↓</button>
+                <button type="button" data-tone="2" data-dir="1">5↑</button>
+              </div>
+            </div>
+          </div>        
+        </div>
+      </div>
+    </div> <!-- End Key & Scale Panel-->
+
+    <!-- Input (Tuning + Noise/Gate + Mixer) -->
+    <div class="panel" data-sidebar-for="editor" id="inputPanel">
+      <div class="panel-header">
+        <h2>Input</h2>
+        <span class="panel-toggle">▼</span>
+      </div>
+      <div class="panel-body">
+        <!-- Tuning subsection -->
+        <div class="subsection">
+          <div class="subsection-title">
+            Tuning
+          </div>
+          <canvas id="tunerCanvas"></canvas>
+          <canvas id="eqCanvas"></canvas>
+          <div class="row-inline">
+            <span>Low Cut</span>
+            <input type="range" id="hpSlider" min="20" max="1000" step="10" value="80" title="Low Cut (high-pass) frequency in Hz">
+            <span id="hpLabel">80 Hz</span>
+          </div>
+          <div class="row-inline">
+            <label for="lpSlider">High Cut</label>
+            <input type="range" id="lpSlider" min="1000" max="8000" step="100" value="4000" title="High Cut (low-pass) frequency in Hz" placeholder="4000" aria-label="High Cut frequency">
+            <span id="lpLabel">4.0 kHz</span>
+          </div>
+        </div> <!-- End Tuning subsection-->
+
+        <!-- Noise/Gate subsection -->
+        <div class="subsection">
+          <div class="subsection-title">
+            Noise / Gate
+          </div>
+          <div class="row-inline">
+            <label for="gateSlider">Gate</label>
+            <input type="range" id="gateSlider" min="0" max="3.0" step="0.1" value="0.2" title="Gate level threshold" placeholder="Gate level" aria-label="Gate level">
+            <span id="gateLabel">0.2×</span>
+          </div>
+          <div class="row-inline">
+            <label for="inputGainSlider">Input Vol</label>
+            <input type="range" id="inputGainSlider" min="0" max="1" step="0.01" value="0.8" title="Input Gain Slider" placeholder="Input Gain Slider" aria-label="Input Gain Slider">
+            <span id="inputGainLabel">80%</span>
+          </div>
+          <div class="status" id="status">The mic currently off.</div>
+            <span>
+              <button type="button" id="startMicBtn">🎙 Start Mic</button>
+              <button type="button" id="monitorBtn">Monitor Off</button>
+            </span>          
+        </div>        
+      </div>
+    </div> <!-- End Input Panel-->    
+  </div> <!-- End Sidebar-->
+
+  <!-- MAIN / VISUALS -->
+  <main class="main" id="mainArea">
+
+  <!-- SEQUENCER -->
+  <section id="sequencerView" class="main-view visible">  
+      <canvas id="seqLoopBarCanvas" class="loop-bar"></canvas>
+      <div id="sequencerGrid" class="sequencer-grid"></div>
+  </section>   
+  
+
+  <!-- MIDI EDITOR (your current UI) -->
+  <section id="midiEditorView" class="main-view">
+    <div class="visual-row">
+      <div class="piano-roll-container">
+        <canvas id="loopBarCanvas" class="loop-bar"></canvas>
+        <canvas id="pianoRollCanvas"></canvas>
+
+        <!-- Quantize / Humanize / Swing toolbar -->
+        <div class="timeline-toolbar">
+        <div class="toolbar-left">
+          <button id="selectModeBtn" type="button" class="mode-btn">Select</button>
+          <button id="drawModeBtn" type="button" class="mode-btn active">Draw</button>
+
+          <label id="gridLabel" class="toolbar-label">
+            Grid
+            <select id="gridSelect">
+              <option value="1">1 bar</option>
+              <option value="0.5">1/2 bar</option>
+              <option value="0.25">1/4 bar</option>
+              <option value="0.125">1/8 bar</option>
+              <option value="0.0625">1/16 bar</option>
+            </select>
+          </label>
+
+          <label class="toolbar-label">
+            Swing
+            <input type="range" id="swingSlider" min="0" max="0.6" step="0.02" value="0">
+            <span id="swingLabel" class="tiny-label">0%</span>
+          </label>
+        </div>
+
+        <div class="toolbar-right">
+          <button id="undoBtn" type="button" disabled>Undo</button>
+          <button id="redoBtn" type="button" disabled>Redo</button>          
+        </div>
+      </div>
+        <canvas id="velocityCanvas"></canvas>
+      </div>
+    </div>    
+  </div>
+  </section> <!-- End MIDI EDITOR -->
+
+  <!-- MIXER -->
+  <section id="mixerView" class="main-view">
+    <div id="mixerStrips" class="mixer-strips"></div>
+  </section>
+
+  <!-- PROJECTS -->
+  <section id="projectsView" class="main-view">
+    <div class="projects-shell">
+      <div class="projects-toolbar">
+        <div>
+          <h2>Projects</h2>
+          <span>Saved locally in this browser. Export JSON for portable files.</span>
+        </div>
+        <div class="projects-actions">
+          <button type="button" id="projectLibrarySaveBtn">Save Current</button>
+          <button type="button" id="projectLibraryImportBtn">Import JSON</button>
+        </div>
+      </div>
+      <div id="projectsList" class="projects-list"></div>
+    </div>
+  </section>
+
+</main>
+
+<!--  GLOBAL FOOTER (all views) -->
+<footer class="global-footer">  
+  <div class="bottom-bar">
+    <!-- Help -->
+      <div class="help-panel" data-sidebar-for="sequencer,editor,mixer,projects" id="panelHelp">        
+        <div class="panel-body">
+          <div id="helpText" class="help-text">
+            Hover over any control to see what it does.
+          </div>
+        </div>
+      </div>     
+    <div>
+      <span>Scroll to pan; Ctrl+Scroll to zoom time; Shift+Scroll to zoom pitch. Drag to select, click to draw notes. Right-click the grid for Quantize / Humanize.</span>
+    </div>
+    <div>
+      <span class="pill">Tip</span>
+      Sing steady notes or play your MIDI keyboard; the EQ and gate can help stabilize detection.
+    </div>
+  </div>      
+</footer>   
+
+
+<!-- Custom context menu -->
+<div id="contextMenu" class="context-menu">
+  <button data-action="quantizeSel">Quantize selection</button>
+  <button data-action="quantizeAll">Quantize all</button>
+  <button data-action="humanizeSel">Humanize selection</button>
+  <button data-action="humanizeAll">Humanize all</button>
+  <button data-action="clipQuantize">Quantize clip</button>
+  <button data-action="clipHumanize">Humanize clip</button>
+  <hr>
+  <button data-action="copySel">Copy</button>
+  <button data-action="paste">Paste</button>
+  <button data-action="duplicateSel">Duplicate</button>
+  <button data-action="deleteSel">Delete</button>
+  <button data-action="clipCopy">Copy clip</button>
+  <button data-action="clipCut">Cut clip</button>
+  <button data-action="clipPaste">Paste clip</button>
+  <button data-action="clipDuplicate">Duplicate clip</button>
+  <button data-action="clipRename">Rename clip</button>
+  <button data-action="clipOpen">Open clip editor</button>
+  <button data-action="clipSetLoop">Set loop to clip</button>
+  <button data-action="clipClear">Clear clip notes</button>
+  <button data-action="deleteClip">Delete clip</button>
+</div>
+
+
+<!--App Settings Popup-->
+<div id="appSettingsModal" class="modal-backdrop">
+  <div class="modal-dialog">
+    <div class="modal-header">
+      <span>App Settings</span>
+      <button id="appSettingsModalClose" type="button">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="settings-section">
+        <div class="settings-section-title">Appearance</div>
+        <label>
+          Skin
+          <select id="skinSelect">
+            <option value="ssl">Vintage SSL</option>
+            <option value="modern">Modern Dark</option>
+            <option value="silver">Silver Studio</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-title">Metronome</div>
+        <label>
+        Pre-count
+        <select id="precountSelect">
+          <option value="0">Off</option>
+          <option value="1">1 bar</option>
+          <option value="2">2 bars</option>
+          <option value="4">4 bars</option>
+        </select>
+      </label>
+
+      <label>
+        Volume
+        <input type="range" id="metroVolSlider" min="0" max="1" step="0.05" value="0.6">
+      </label>
+
+      <label>
+        Sound
+        <select id="metroSoundSelect">
+          <option value="beep">Beep</option>
+          <option value="click">Click</option>
+          <option value="wood">Wood</option>
+        </select>
+      </label>
+      </div>
+    </div>
+  </div>
+</div> <!-- End App Settings Popup-->
+
+<div id="toastContainer"></div>
+
+  <div id="synthModal" class="modal-backdrop synth-modal">
+    <div class="modal-dialog synth-dialog">
+      <div class="modal-header synth-modal-header">
+        <span>Synth</span>
+        <button id="synthModalClose" type="button">×</button>
+      </div>
+      <div id="synthControls" class="synth-controls visible">
+        <div class="synth-body">
+          <section class="synth-section synth-preset-strip">
+            <div class="synth-section-title">Preset</div>
+            <div class="synth-row synth-preset-row">
+                <label for="synthPreset">Preset</label>
+                <select id="synthPreset">
+                  <option value="init">Init</option>
+                  <option value="softSine">Soft Sine</option>
+                  <option value="glassKeys">Glass Keys</option>
+                  <option value="warmPad">Warm Pad</option>
+                  <option value="slowChoir">Slow Choir</option>
+                  <option value="brightPluck">Bright Pluck</option>
+                  <option value="marimbaPluck">Marimba Pluck</option>
+                  <option value="sawLead">Saw Lead</option>
+                  <option value="squareLead">Square Lead</option>
+                  <option value="analogBass">Analog Bass</option>
+                  <option value="subBass">Sub Bass</option>
+                  <option value="acidBass">Acid Bass</option>
+                  <option value="softOrgan">Soft Organ</option>
+                  <option value="noirKeys">Noir Keys</option>
+                  <option value="airPad">Air Pad</option>
+                  <option value="pluckBass">Pluck Bass</option>
+                </select>
+                <button type="button" id="synthSavePresetBtn">Save Preset</button>
+            </div>
+          </section>
+          <section class="synth-section">
+            <div class="synth-section-title">Oscillators</div>
+              <div class="synth-row">
+                <label for="synthWave">Wave</label>
+                <select id="synthWave">
+                  <option value="sine">Sine</option>
+                  <option value="triangle">Triangle</option>
+                  <option value="square">Square</option>
+                  <option value="sawtooth">Saw</option>
+                </select>
+              </div>
+              <div class="synth-row">
+                <label for="synthOsc2Wave">Osc 2</label>
+                <select id="synthOsc2Wave">
+                  <option value="off">Off</option>
+                  <option value="sine">Sine</option>
+                  <option value="triangle">Triangle</option>
+                  <option value="square">Square</option>
+                  <option value="sawtooth">Saw</option>
+                </select>
+              </div>
+              <div class="row-inline">
+                <label for="synthOsc2Mix">Osc 2 Mix</label>
+                <input type="range" id="synthOsc2Mix" min="0" max="1" step="0.01" value="0">
+                <span class="synth-value" id="synthOsc2MixVal">0.00</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthOsc2Detune">Osc 2 Det</label>
+                <input type="range" id="synthOsc2Detune" min="-50" max="50" step="1" value="0">
+                <span class="synth-value" id="synthOsc2DetuneVal">0</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthNoise">Noise</label>
+                <input type="range" id="synthNoise" min="0" max="1" step="0.01" value="0">
+                <span class="synth-value" id="synthNoiseVal">0.00</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthGlide">Glide</label>
+                <input type="range" id="synthGlide" min="0" max="0.5" step="0.01" value="0">
+                <span class="synth-value" id="synthGlideVal">0.00</span>
+              </div>
+          </section>
+          <section class="synth-section">
+            <div class="synth-section-title">Amp</div>
+              <div class="row-inline">
+                <label for="synthAttack">Attack</label>
+                <input type="range" id="synthAttack" min="0" max="1" step="0.01" value="0.01">
+                <span class="synth-value" id="synthAttackVal">0.01</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthDecay">Decay</label>
+                <input type="range" id="synthDecay" min="0" max="1" step="0.01" value="0.1">
+                <span class="synth-value" id="synthDecayVal">0.10</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthSustain">Sustain</label>
+                <input type="range" id="synthSustain" min="0" max="1" step="0.01" value="0.8">
+                <span class="synth-value" id="synthSustainVal">0.80</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthRelease">Release</label>
+                <input type="range" id="synthRelease" min="0" max="2" step="0.01" value="0.25">
+                <span class="synth-value" id="synthReleaseVal">0.25</span>
+              </div>
+          </section>
+          <section class="synth-section">
+            <div class="synth-section-title">Filter</div>
+              <div class="row-inline">
+                <label for="synthCutoff">Filter</label>
+                <input type="range" id="synthCutoff" min="200" max="12000" step="50" value="8000">
+                <span class="synth-value" id="synthCutoffVal">8k</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthFilterQ">Res</label>
+                <input type="range" id="synthFilterQ" min="0.1" max="12" step="0.1" value="0.8">
+                <span class="synth-value" id="synthFilterQVal">0.8</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthDetune">Detune</label>
+                <input type="range" id="synthDetune" min="-50" max="50" step="1" value="0">
+                <span class="synth-value" id="synthDetuneVal">0</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthFilterEnv">Env Amt</label>
+                <input type="range" id="synthFilterEnv" min="-6000" max="6000" step="100" value="0">
+                <span class="synth-value" id="synthFilterEnvVal">0</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthFilterAttack">F Attack</label>
+                <input type="range" id="synthFilterAttack" min="0" max="1" step="0.01" value="0.01">
+                <span class="synth-value" id="synthFilterAttackVal">0.01</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthFilterDecay">F Decay</label>
+                <input type="range" id="synthFilterDecay" min="0" max="2" step="0.01" value="0.25">
+                <span class="synth-value" id="synthFilterDecayVal">0.25</span>
+              </div>
+          </section>
+          <section class="synth-section">
+            <div class="synth-section-title">Mod + FX</div>
+              <div class="synth-row">
+                <label for="synthLfoTarget">LFO</label>
+                <select id="synthLfoTarget">
+                  <option value="pitch">Pitch</option>
+                  <option value="filter">Filter</option>
+                </select>
+              </div>
+              <div class="row-inline">
+                <label for="synthLfoRate">LFO Rate</label>
+                <input type="range" id="synthLfoRate" min="0" max="12" step="0.1" value="0">
+                <span class="synth-value" id="synthLfoRateVal">0.0</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthLfoAmount">LFO Amt</label>
+                <input type="range" id="synthLfoAmount" min="0" max="1000" step="10" value="0">
+                <span class="synth-value" id="synthLfoAmountVal">0</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthDrive">Drive</label>
+                <input type="range" id="synthDrive" min="0" max="1" step="0.01" value="0">
+                <span class="synth-value" id="synthDriveVal">0.00</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthPan">Pan</label>
+                <input type="range" id="synthPan" min="-1" max="1" step="0.01" value="0">
+                <span class="synth-value" id="synthPanVal">0.00</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthChorus">Chorus</label>
+                <input type="range" id="synthChorus" min="0" max="1" step="0.01" value="0">
+                <span class="synth-value" id="synthChorusVal">0.00</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthDelaySend">Delay</label>
+                <input type="range" id="synthDelaySend" min="0" max="1" step="0.01" value="0">
+                <span class="synth-value" id="synthDelaySendVal">0.00</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthReverbSend">Space</label>
+                <input type="range" id="synthReverbSend" min="0" max="1" step="0.01" value="0">
+                <span class="synth-value" id="synthReverbSendVal">0.00</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthGain">Volume</label>
+                <input type="range" id="synthGain" min="0" max="1" step="0.01" value="0.25">
+                <span class="synth-value" id="synthGainVal">0.25</span>
+              </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="drum808Modal" class="modal-backdrop drum808-modal">
+    <div class="modal-dialog drum808-dialog">
+      <div class="modal-header drum808-modal-header">
+        <span>808 Drum Machine</span>
+        <button id="drum808ModalClose" type="button">×</button>
+      </div>
+      <div class="drum808-body">
+        <section class="drum808-section drum808-preset-strip">
+          <div class="drum808-section-title">Kit</div>
+          <div class="drum808-row drum808-preset-row">
+            <label for="drum808Preset">Preset</label>
+            <select id="drum808Preset">
+              <option value="classic">Classic 808</option>
+              <option value="deep">Deep Club</option>
+              <option value="tight">Tight Electro</option>
+              <option value="dirty">Dirty Tape</option>
+              <option value="airy">Air Hats</option>
+            </select>
+            <button type="button" id="drum808SavePresetBtn">Save Preset</button>
+          </div>
+        </section>
+        <section class="drum808-section drum808-pad-bank-section">
+          <div class="drum808-section-title">Pads</div>
+          <div id="drum808ModalPads" class="drum808-panel"></div>
+        </section>
+        <section class="drum808-section">
+          <div class="drum808-section-title">Tone</div>
+          <div class="row-inline"><label for="drum808Tone">Tone</label><input type="range" id="drum808Tone" min="0" max="1" step="0.01" value="1"><span class="synth-value" id="drum808ToneVal">1.00</span></div>
+          <div class="row-inline"><label for="drum808Pitch">Pitch</label><input type="range" id="drum808Pitch" min="0.5" max="1.8" step="0.01" value="1"><span class="synth-value" id="drum808PitchVal">1.00</span></div>
+          <div class="row-inline"><label for="drum808Punch">Punch</label><input type="range" id="drum808Punch" min="0" max="1" step="0.01" value="0.8"><span class="synth-value" id="drum808PunchVal">0.80</span></div>
+          <div class="row-inline"><label for="drum808Noise">Noise</label><input type="range" id="drum808Noise" min="0" max="1" step="0.01" value="0.7"><span class="synth-value" id="drum808NoiseVal">0.70</span></div>
+        </section>
+        <section class="drum808-section">
+          <div class="drum808-section-title">Shape</div>
+          <div class="row-inline"><label for="drum808Decay">Decay</label><input type="range" id="drum808Decay" min="0.2" max="2" step="0.01" value="1"><span class="synth-value" id="drum808DecayVal">1.00</span></div>
+          <div class="row-inline"><label for="drum808Snap">Snap</label><input type="range" id="drum808Snap" min="0" max="1" step="0.01" value="0.55"><span class="synth-value" id="drum808SnapVal">0.55</span></div>
+          <div class="row-inline"><label for="drum808HatDecay">Hat Decay</label><input type="range" id="drum808HatDecay" min="0.05" max="1.5" step="0.01" value="0.45"><span class="synth-value" id="drum808HatDecayVal">0.45</span></div>
+          <div class="row-inline"><label for="drum808TomDecay">Tom Decay</label><input type="range" id="drum808TomDecay" min="0.1" max="1.5" step="0.01" value="0.7"><span class="synth-value" id="drum808TomDecayVal">0.70</span></div>
+        </section>
+        <section class="drum808-section">
+          <div class="drum808-section-title">Output</div>
+          <div class="row-inline"><label for="drum808CowbellTune">Cow Tune</label><input type="range" id="drum808CowbellTune" min="0.5" max="1.6" step="0.01" value="1"><span class="synth-value" id="drum808CowbellTuneVal">1.00</span></div>
+          <div class="row-inline"><label for="drum808Drive">Drive</label><input type="range" id="drum808Drive" min="0" max="1" step="0.01" value="0.12"><span class="synth-value" id="drum808DriveVal">0.12</span></div>
+          <div class="row-inline"><label for="drum808Pan">Pan</label><input type="range" id="drum808Pan" min="-1" max="1" step="0.01" value="0"><span class="synth-value" id="drum808PanVal">0.00</span></div>
+          <div class="row-inline"><label for="drum808Gain">Level</label><input type="range" id="drum808Gain" min="0" max="1.5" step="0.01" value="0.95"><span class="synth-value" id="drum808GainVal">0.95</span></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+<script src="app.js"></script>
+
+</body>
+</html>

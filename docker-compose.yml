@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  easydaw:
+    build: .
+    ports:
+      - "8100:8000"
+    volumes:
+      - .:/app
+    environment:
+      - NODE_ENV=development
+    container_name: easydaw-app
