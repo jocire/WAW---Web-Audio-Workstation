@@ -19,7 +19,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def digest(rel):
-    return hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()[:10]
+    # hash with LF line endings so a Windows checkout (CRLF) and the GitHub
+    # Action (LF) compute the same stamp
+    data = (ROOT / rel).read_bytes().replace(b"\r\n", b"\n")
+    return hashlib.sha256(data).hexdigest()[:10]
 
 
 def stamp(text, pattern, rel_of):

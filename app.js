@@ -7795,4 +7795,4 @@ function animateRecordingTransport() {
   if (target === pianoRollCanvas || target === velocityCanvas) {
     e.preventDefault();
   }
-}, { capture: true });
+}, { capture: true }); 
