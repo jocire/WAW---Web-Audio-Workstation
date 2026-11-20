@@ -7650,7 +7650,7 @@ function animateRecordingTransport() {
     if (isTypingTarget(e.target)) return;
     if (window.WAWPadMap?.handleKeyLearn(e)) return; // pad Key Learn
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    if (document.querySelector(".modal-backdrop.visible:not(#synthModal):not(#drum808Modal):not(#samplerModal)")) return;
+    if (document.querySelector(".modal-backdrop.visible:not(#synthModal):not(#drum808Modal):not(#samplerModal):not(#vintageSynthModal):not(#drumMachineModal)")) return;
 
     const activeInst = getActiveTrack()?.type === "audio" ? null : getActiveTrack()?.instrument;
     // pads can be played from every view (arrange, editor, mixer)
@@ -7725,6 +7725,8 @@ function animateRecordingTransport() {
   const midiSourceKey = (src, note) => (src ? `${src.input}#${src.channel}` : "kbd") + ":" + note;
 
   function liveInputTracks(src = null) {
+    const panelTrack = !isRecording && (window.WAWSynthPanel?.currentTrack?.() || window.WAWDrumPanel?.currentTrack?.());
+    if (panelTrack && tracks.includes(panelTrack)) return [panelTrack];
     const armed = tracks.filter(t => t.type !== "audio" && t.armed);
     // with armed tracks, a note only goes to the armed tracks listening to its
     // device / channel (another player's keyboard can feed another track)

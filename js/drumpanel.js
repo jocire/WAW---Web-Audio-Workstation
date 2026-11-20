@@ -235,5 +235,6 @@
     render();
   }
 
-  window.WAWDrumPanel = { open, close, refresh };
+  const currentTrack = () => (modal?.classList.contains("visible") ? track : null);
+  window.WAWDrumPanel = { open, close, refresh, currentTrack };
 })();
