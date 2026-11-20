@@ -455,5 +455,7 @@
     render();
   }
 
-  window.WAWSynthPanel = { open, close, refresh };
+  /** the track being edited while the panel is open (live input plays it) */
+  const currentTrack = () => (modal?.classList.contains("visible") ? track : null);
+  window.WAWSynthPanel = { open, close, refresh, currentTrack };
 })();
