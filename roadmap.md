@@ -18,6 +18,10 @@ document tracks what exists, what is known to be limited, and what comes next.
 | `js/audio.js` | Audio tracks: input devices, monitoring, recording, audio clips, clip editor |
 | `js/workspace.js` | Track management, shortcuts, transport display, drag & drop, voicing, MIDI input settings |
 | `js/collab.js` | Real-time collaboration (WebRTC via Trystero/Nostr), chat, video |
+| `js/tempo.js` | Tempo map (tempo + time-signature changes), markers, arranger sections |
+| `js/automation.js` | Automation lanes, read/touch/latch/write, realtime + offline playback |
+| `js/warp.js` | Audio warping (WSOLA time-stretch), tempo detection, audio quantize |
+| `js/comp.js` | Take lanes and comping for cycle recordings |
 | `css/waw-ext.css` | Styles for all of the above |
 
 The same mixer graph is built for realtime playback and for `OfflineAudioContext`
@@ -77,6 +81,36 @@ WAV export, so what you hear is what you export.
 - MIDI input device + channel filter; chord voicing (inversion, per-tone octave) works.
 - Projects embed their audio when exported as JSON.
 
+### Audio input (per track)
+- Every audio track has its own input: device, channels (auto / stereo / mono 1..N),
+  input gain (-24..+40 dB), optional browser auto-gain + noise suppression, level meter
+  with a "no signal" hint. Devices are shared between tracks and closed when unused;
+  several armed tracks record their own inputs at the same time.
+
+### Timeline
+- Tempo map: tempo changes and time-signature changes (any n/d) in a global lane;
+  content keeps its bar/beat position when the map changes. Grid, ruler, snapping,
+  quantize, metronome, bars.beats display and MIDI export (tempo + meter meta events)
+  follow the map.
+- Markers / arranger sections: loop a section, duplicate it (inserted after), delete it
+  (closing the gap), insert bars; markers can be dragged and renamed.
+
+### Automation
+- Lanes for volume, pan, sends A–D and every numeric insert-FX parameter (A button on
+  the track). Draw/drag/delete points (snapped; Alt = free).
+- Modes: Off, Read, Touch (writes while a control is held), Latch (from the touch until
+  stop), Write (all lanes from play start; drops to Touch afterwards). One undo per pass.
+- WAV export renders volume/pan/send automation as exact ramps and FX parameters in
+  1/40 s steps.
+
+### Warping, audio quantize, comping
+- Warp an audio clip to the song tempo (source BPM detected automatically); stretched
+  with WSOLA so the pitch is kept, cached per tempo; varispeed until the render is ready.
+- Quantize audio: slices the clip at its transients and moves each slice onto the grid.
+- Cycle recording keeps every complete pass as a take; take lanes under the track let
+  you click a take (whole clip) or swipe a range (comp); comp boundaries crossfade.
+  Flatten renders the comp into one clip.
+
 ### Collaboration (v1)
 - Serverless WebRTC rooms via [Trystero](https://github.com/dmotz/trystero) over public
   Nostr relays (handshakes encrypted with the room code). Link format `…#room=<code>`.
@@ -93,10 +127,14 @@ WAV export, so what you hear is what you export.
   (no TURN server), so some corporate networks will not connect. No authentication —
   anyone with the link can join and edit. Suitable for small rooms (≈2–6 people).
 - Transport sync between collaborators is approximate (no shared clock).
-- 4/4 only; no tempo or time-signature changes.
-- No automation lanes yet; mixer moves are static per project.
-- Audio clips are not time-stretched when the BPM changes (their start positions move,
-  their content does not).
+- Tempo changes are steps (no tempo ramps). A warped clip uses the tempo at its start
+  (a tempo change inside a warped clip is not followed within the clip).
+- Automation covers track channels; bus and master automation are not available yet.
+  Plugin parameters that rebuild internally (e.g. reverb size) can click when automated.
+- Inserting a time-signature change keeps content on its beat position, so bar numbers
+  after the change shift (same as most DAWs).
+- Real USB-microphone capture was verified only with simulated devices in this
+  environment; please report the input meter readings if a device stays silent.
 - Recording latency compensation uses the browser-reported latency plus a manual offset;
   calibrate per device in the sidebar (Audio Input → Latency offset).
 - Samples live in the browser's IndexedDB; clearing site data deletes them unless the
@@ -111,10 +149,10 @@ WAV export, so what you hear is what you export.
    merge per track/clip/parameter instead of whole-project last-writer-wins. Add per-object
    soft locks ("Bob is editing Clip 3") and remote cursors in the piano roll.
 2. **TURN fallback** for networks where peer-to-peer fails (configurable ICE servers).
-3. **Automation lanes** for fader, pan, sends and any FX parameter (read/write/latch/touch).
-4. **Time signatures + tempo track** (and markers / arranger sections).
-5. **Audio warping**: time-stretch audio clips with the tempo; transient-based quantize.
-6. **Comping**: keep all cycle-recording takes as lanes and pick the best parts.
+3. Tempo ramps and warp markers (elastic audio inside a clip).
+4. Bus/master automation; automation for instrument (synth/drum/sampler) parameters.
+5. Audio input: per-track input FX before recording, punch-in/out ranges.
+6. Comping for MIDI takes.
 
 ### Mid term
 7. **User management** (when a backend exists): accounts, project ownership,

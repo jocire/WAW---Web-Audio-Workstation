@@ -426,6 +426,7 @@
         // cycle recording: every complete pass is kept as a take lane (comping)
         clip.takes = place.passes.map((off, i) => ({ sampleId: id, offset: off, name: `Pass ${i + 1}` }));
         clip.activeTake = clip.takes.length - 1;
+        clip.showTakes = true;
       }
       made++;
     }
@@ -456,23 +457,32 @@
   }
 
   /** audio playback events overlapping [rangeStart, rangeEnd) */
-  function collectAudioEvents(rangeStart, rangeEnd, { audibleOnly = false } = {}) {
+  function collectAudioEvents(rangeStart, rangeEnd, { audibleOnly = false, clip = null } = {}) {
     const out = [];
+    const addClip = (t, c) => {
+      if (!c.audio?.sampleId || (c.muted && !clip)) return;
+      if (c.endSec <= rangeStart || c.startSec >= rangeEnd) return;
+      // warped clips: k song seconds per source second; comps: one event per segment
+      const k = window.WAWWarp ? window.WAWWarp.factor(c) : 1;
+      const segs = window.WAWComp ? window.WAWComp.segments(c) : [{ src: c.audio, start: 0, end: c.endSec - c.startSec, fadeIn: c.audio.fadeIn || 0, fadeOut: c.audio.fadeOut || 0 }];
+      segs.forEach(sg => {
+        const segStart = c.startSec + sg.start, segEnd = c.startSec + sg.end;
+        if (segEnd <= rangeStart || segStart >= rangeEnd || !sg.src?.sampleId) return;
+        const start = Math.max(segStart, rangeStart);
+        const end = Math.min(segEnd, rangeEnd);
+        out.push({
+          kind: "audio", trackId: t?.id, clipId: c.id, sampleId: sg.src.sampleId, k,
+          start, end, offset: (sg.src.offset || 0) + (start - c.startSec) / k,
+          clipStart: segStart, clipEnd: segEnd,
+          gain: c.audio.gain || 0, fadeIn: sg.fadeIn, fadeOut: sg.fadeOut
+        });
+      });
+    };
+    if (clip) { addClip(tracks.find(t => (t.clips || []).includes(clip)), clip); return out; }
     tracks.forEach(t => {
       if (t.type !== "audio") return;
       if (audibleOnly && !isAudible(t)) return;
-      (t.clips || []).forEach(c => {
-        if (!c.audio?.sampleId || c.muted) return;
-        if (c.endSec <= rangeStart || c.startSec >= rangeEnd) return;
-        const start = Math.max(c.startSec, rangeStart);
-        const end = Math.min(c.endSec, rangeEnd);
-        out.push({
-          kind: "audio", trackId: t.id, clipId: c.id, sampleId: c.audio.sampleId,
-          start, end, offset: (c.audio.offset || 0) + (start - c.startSec),
-          clipStart: c.startSec, clipEnd: c.endSec,
-          gain: c.audio.gain || 0, fadeIn: c.audio.fadeIn || 0, fadeOut: c.audio.fadeOut || 0
-        });
-      });
+      (t.clips || []).forEach(c => addClip(t, c));
     });
     return out;
   }
@@ -482,17 +492,25 @@
    * (for offline rendering, `when` equals the song position).
    */
   function scheduleAudioEvent(ctx, destination, ev, when, lateBy = 0) {
-    const buf = S().get(ev.sampleId);
+    const k = ev.k || 1;
+    // warped: pitch-preserving stretched render when ready, varispeed until then
+    let buf = null, stretched = false;
+    if (Math.abs(k - 1) >= 1e-3 && window.WAWWarp) { buf = window.WAWWarp.getStretched(ev.sampleId, k); stretched = !!buf; }
+    if (!buf) buf = S().get(ev.sampleId);
     if (!buf) { S().load(ev.sampleId); return []; }
     const src = ctx.createBufferSource();
     src.buffer = buf;
+    const rate = Math.abs(k - 1) >= 1e-3 && !stretched ? 1 / k : 1;
+    if (rate !== 1) src.playbackRate.value = rate;
+    // buffer time per song second: 1 (plain/stretched) or 1/k (varispeed)
+    const toBuf = (srcSec) => stretched ? srcSec * k : srcSec;
     const g = ctx.createGain();
     const level = Math.pow(10, (ev.gain || 0) / 20);
     const startT = when + lateBy;
     const songStart = ev.start + lateBy;
     const dur = ev.end - songStart;
     if (dur <= 0.001) return [];
-    const offset = ev.offset + lateBy;
+    const offset = toBuf(ev.offset + lateBy / k);
     if (offset >= buf.duration) return [];
     // fades are defined relative to the clip edges
     const fadeInEnd = ev.clipStart + ev.fadeIn;
@@ -511,7 +529,7 @@
       g.gain.linearRampToValueAtTime(levelAt(ev.end), startT + dur);
     }
     src.connect(g); g.connect(destination);
-    src.start(startT, offset, Math.min(dur, buf.duration - offset));
+    src.start(startT, offset, Math.min(stretched || rate === 1 ? dur : dur * rate, buf.duration - offset));
     return [src];
   }
 
@@ -524,12 +542,15 @@
   function trimAudioClip(clip, origStart, origEnd, origOffset) {
     if (!clip.audio) return;
     const dur = sampleDuration(clip);
+    const k = window.WAWWarp ? window.WAWWarp.factor(clip) : 1;
     // left edge: content stays put, so the offset moves with the edge
-    let newOffset = origOffset + (clip.startSec - origStart);
-    if (newOffset < 0) { clip.startSec -= newOffset; newOffset = 0; }
+    let newOffset = origOffset + (clip.startSec - origStart) / k;
+    if (newOffset < 0) { clip.startSec -= newOffset * k; newOffset = 0; }
+    const dSrc = newOffset - (clip.audio.offset || 0);
     clip.audio.offset = newOffset;
+    if (Math.abs(dSrc) > 1e-9) window.WAWComp?.onTrim(clip, dSrc); // takes + comp follow the edge
     // right edge cannot extend past the end of the sample
-    const maxEnd = clip.startSec + (dur - newOffset);
+    const maxEnd = clip.startSec + (dur - newOffset) * k;
     if (clip.endSec > maxEnd) clip.endSec = maxEnd;
     if (clip.endSec <= clip.startSec + 0.01) clip.endSec = clip.startSec + 0.01;
   }
@@ -538,7 +559,17 @@
     const a = clip.audio;
     if (!a?.sampleId) return;
     if (!S().has(a.sampleId)) { S().load(a.sampleId).then(b => b && canvas.isConnected && drawClipWave(canvas, clip, color)); return; }
-    S().drawWaveform(canvas, a.sampleId, { start: a.offset, end: a.offset + (clip.endSec - clip.startSec), color: color || "rgba(255,255,255,0.8)", gain: Math.pow(10, (a.gain || 0) / 20) });
+    const k = window.WAWWarp ? window.WAWWarp.factor(clip) : 1;
+    const len = clip.endSec - clip.startSec;
+    const opts = { color: color || "rgba(255,255,255,0.8)", gain: Math.pow(10, (a.gain || 0) / 20) };
+    const segs = window.WAWComp?.hasTakes(clip) && clip.comp?.length ? window.WAWComp.segments(clip) : null;
+    if (!segs) { S().drawWaveform(canvas, a.sampleId, { ...opts, start: a.offset, end: a.offset + len / k }); return; }
+    // comp: draw each segment from its take
+    S().drawWaveform(canvas, a.sampleId, { ...opts, start: 0, end: 0, color: "transparent" });
+    segs.forEach((sg, i) => {
+      if (!S().has(sg.src.sampleId)) return;
+      S().drawWaveform(canvas, sg.src.sampleId, { ...opts, keep: true, region: [sg.start / len, sg.end / len], start: sg.src.offset + sg.start / k, end: sg.src.offset + sg.end / k, color: i % 2 ? "rgba(255,255,255,0.8)" : "rgba(191,219,254,0.9)" });
+    });
   }
 
   async function importFilesToTrack(files, trackIndex, atSec) {

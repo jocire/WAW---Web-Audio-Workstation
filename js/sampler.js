@@ -161,7 +161,10 @@
     const ids = new Set();
     (list || []).forEach(t => {
       (t.samplerPatch?.pads || []).forEach(p => p.sampleId && ids.add(p.sampleId));
-      (t.clips || []).forEach(c => c.audio?.sampleId && ids.add(c.audio.sampleId));
+      (t.clips || []).forEach(c => {
+        if (c.audio?.sampleId) ids.add(c.audio.sampleId);
+        (c.takes || []).forEach(x => x.sampleId && ids.add(x.sampleId)); // comp takes
+      });
     });
     return ids;
   }

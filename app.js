@@ -5793,6 +5793,21 @@ makeLoopInteractor(seqLoopBarCanvas, () => ({
       "clipMute",
       "deleteClip"
     ];
+    // audio-clip actions (warp, audio quantize, take lanes, comp)
+    const ctxClip = target === "clip" && seqContextTarget ? tracks[seqContextTarget.trackIndex]?.clips?.find(c => c.id === seqContextTarget.clipId) : null;
+    const audioOnly = { audioWarp: !!ctxClip?.audio, audioQuantize: !!ctxClip?.audio, clipTakes: !!ctxClip?.takes?.length, clipFlatten: !!ctxClip?.takes?.length };
+    Object.entries(audioOnly).forEach(([id, show]) => {
+      const btn = contextMenuEl.querySelector(`button[data-action="${id}"]`);
+      if (!btn) return;
+      btn.style.display = show ? "block" : "none";
+      if (id === "audioWarp") btn.textContent = ctxClip?.audio?.warp?.on ? `Warp: on (${ctxClip.audio.warp.srcBpm} BPM source) — turn off` : "Warp to song tempo…";
+      if (id === "clipTakes") btn.textContent = ctxClip?.showTakes ? "Hide take lanes" : `Show take lanes (${ctxClip?.takes?.length || 0})`;
+    });
+    // MIDI-only clip actions make no sense on audio clips
+    ["clipQuantize", "clipHumanize", "clipClear"].forEach(id => {
+      const btn = contextMenuEl.querySelector(`button[data-action="${id}"]`);
+      if (btn && ctxClip?.audio) btn.style.display = "none";
+    });
     clipOnly.forEach(id => {
       const btn = contextMenuEl.querySelector(`button[data-action="${id}"]`);
       if (!btn) return;
@@ -7331,6 +7346,7 @@ function animateRecordingTransport() {
     // Same channel strips, inserts, sends and master chain as realtime playback
     const graph = await window.WAWMixer.createOfflineGraph(offline);
     window.WAWAutomation?.applyOffline(offline, graph, duration);
+    await window.WAWWarp?.prepareAll(); // warped clips render their stretched audio
     await window.WAWSampler?.preloadForTracks(tracks);
     mixNotes.forEach(n => renderNoteOffline(offline, graph.inputFor(n.trackId), n));
     for (const ev of audioEvents) {
@@ -7690,6 +7706,10 @@ function animateRecordingTransport() {
         }
         else if (action === "clipSplit") window.WAWWorkspace?.splitClipAt(trackIndex, clipId, lastPlayheadSec);
         else if (action === "clipMute") window.WAWWorkspace?.toggleClipMute(trackIndex, clipId);
+        else if (action === "audioWarp") window.WAWWarp?.setWarp(trackIndex, clipId);
+        else if (action === "audioQuantize") window.WAWWarp?.quantizeAudio(trackIndex, clipId);
+        else if (action === "clipTakes") window.WAWComp?.toggleTakes(trackIndex, clipId);
+        else if (action === "clipFlatten") window.WAWComp?.flatten(trackIndex, clipId);
         else if (action === "clipSetLoop") setLoopToClip(trackIndex, clipId);
         else if (action === "clipClear") clearClipNotes(trackIndex, clipId);
         else if (action === "deleteClip") deleteClip(trackIndex, clipId);

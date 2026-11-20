@@ -149,18 +149,24 @@
     return out;
   }
 
-  function drawWaveform(canvas, id, { start = 0, end = null, color = "rgba(255,255,255,0.75)", bg = null, gain = 1 } = {}) {
+  /** region: [from, to] as fractions of the canvas width; keep: draw over the existing canvas */
+  function drawWaveform(canvas, id, { start = 0, end = null, color = "rgba(255,255,255,0.75)", bg = null, gain = 1, region = null, keep = false } = {}) {
     if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth || canvas.parentElement?.clientWidth || 1;
     const h = canvas.clientHeight || canvas.parentElement?.clientHeight || 1;
-    canvas.width = Math.max(1, Math.floor(w * dpr));
-    canvas.height = Math.max(1, Math.floor(h * dpr));
     const ctx = canvas.getContext("2d");
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    if (bg) { ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h); }
-    const pk = peaks(id, Math.max(16, Math.min(4000, Math.floor(w))), start, end);
+    if (!keep) {
+      canvas.width = Math.max(1, Math.floor(w * dpr));
+      canvas.height = Math.max(1, Math.floor(h * dpr));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      if (bg) { ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h); }
+    }
+    if (end != null && end <= start) return;
+    const x0 = region ? region[0] * w : 0;
+    const rw = region ? Math.max(1, (region[1] - region[0]) * w) : w;
+    const pk = peaks(id, Math.max(16, Math.min(4000, Math.floor(rw))), start, end);
     if (!pk) return;
     const mid = h / 2;
     ctx.fillStyle = color;
@@ -168,7 +174,7 @@
     for (let x = 0; x < cols; x++) {
       const mn = Math.max(-1, pk[x * 2] * gain), mx = Math.min(1, pk[x * 2 + 1] * gain);
       const y1 = mid - mx * mid, y2 = mid - mn * mid;
-      ctx.fillRect((x / cols) * w, y1, Math.max(1, w / cols), Math.max(1, y2 - y1));
+      ctx.fillRect(x0 + (x / cols) * rw, y1, Math.max(1, rw / cols), Math.max(1, y2 - y1));
     }
   }
 

@@ -397,3 +397,14 @@ body.collab-open header, body.collab-open .app, body.collab-open .global-footer 
 .auto-name { fill: #94a3b8; font: 10px system-ui; pointer-events: none; }
 .seq-label-btns .tb-a.on { background: #a855f7; color: #fff; }
 .seq-label-btns .tb-a.has:not(.on) { box-shadow: inset 0 -2px 0 #a855f7; }
+
+/* ---------------- take lanes (comping) ---------------- */
+.take-row { min-height: 40px; height: 40px; }
+.take-row .seq-row-label { background: #10131d; display: flex; flex-direction: column; justify-content: center; padding: 2px 6px; font-size: 11px; color: #cbd5e1; }
+.take-row .seq-row-label small { font-size: 8.5px; opacity: 0.6; }
+.take-lane { position: relative; background: rgba(8, 10, 18, 0.9); border-top: 1px solid #1c2235; }
+.take-clip { position: absolute; top: 3px; bottom: 3px; background: rgba(51, 65, 85, 0.55); border: 1px solid #334155; border-radius: 3px; overflow: hidden; cursor: crosshair; }
+.take-clip canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.take-used { position: absolute; top: 0; bottom: 0; background: rgba(34, 197, 94, 0.28); border-left: 1px solid #22c55e; border-right: 1px solid #22c55e; pointer-events: none; }
+.take-name { position: absolute; left: 4px; top: 1px; font: 600 9px system-ui; color: #e2e8f0; pointer-events: none; }
+.take-sel { display: none; position: absolute; top: 0; bottom: 0; background: rgba(250, 204, 21, 0.3); border: 1px solid #facc15; pointer-events: none; }

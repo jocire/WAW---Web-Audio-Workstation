@@ -227,7 +227,9 @@
     const right = new Clip({ startSec: at, endSec: clip.endSec, notesSnapshot: [] });
     right.name = (clip.name || "Clip") + " (2)";
     if (clip.audio) {
-      right.audio = { ...clip.audio, offset: clip.audio.offset + (at - clip.startSec), fadeIn: 0.003 };
+      const k = window.WAWWarp ? window.WAWWarp.factor(clip) : 1;
+      right.audio = { ...clip.audio, offset: clip.audio.offset + (at - clip.startSec) / k, fadeIn: 0.003 };
+      window.WAWComp?.splitTakes(clip, right, at - clip.startSec);
       clip.audio.fadeOut = Math.min(clip.audio.fadeOut || 0.003, 0.003);
     } else {
       const local = getClipLocalNotes(clip);
