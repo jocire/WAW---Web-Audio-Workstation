@@ -24,6 +24,10 @@ document tracks what exists, what is known to be limited, and what comes next.
 | `js/comp.js` | Take lanes and comping for cycle recordings |
 | `css/waw-ext.css` | Styles for all of the above |
 
+Script and stylesheet URLs carry a content hash (`app.js?v=…`) so browsers never mix old
+and new files after an update. `tools/stamp_assets.py` writes the stamps; the
+"Stamp asset versions" GitHub Action re-runs it on every push to `main`.
+
 The same mixer graph is built for realtime playback and for `OfflineAudioContext`
 WAV export, so what you hear is what you export.
 
