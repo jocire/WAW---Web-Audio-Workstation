@@ -1219,10 +1219,10 @@ function syncTrackNotesFromClip(track, clip) {
   function render808PadPanel() {
     return `
       <div class="drum808-panel">
-        ${DRUM_808_VOICES.map(v => `
-          <button type="button" class="drum808-pad" data-note="${v.note}" title="${v.label} - MIDI ${v.note}">
+        ${DRUM_808_VOICES.map((v, i) => `
+          <button type="button" class="drum808-pad" data-note="${v.note}" data-pad="${i}" title="${v.label} · MIDI ${window.WAWPadMap?.midiLabel(i, "808") ?? v.note} · key ${window.WAWPadMap?.keyLabel(i) ?? v.key}">
             <span>${v.label}</span>
-            <small>${v.key}</small>
+            <small>${window.WAWPadMap?.keyLabel(i) ?? v.key}</small>
           </button>
         `).join("")}
       </div>
@@ -1234,6 +1234,7 @@ function syncTrackNotesFromClip(track, clip) {
       pad.addEventListener("click", (e) => {
         e.stopPropagation();
         const note = Number(pad.dataset.note);
+        window.WAWPadMap?.setLearnPad(Number(pad.dataset.pad)); // choose the pad to learn
         trigger808PadNote(note, 112);
       });
     });
@@ -1241,13 +1242,20 @@ function syncTrackNotesFromClip(track, clip) {
 
   function render808ModalPads() {
     if (!drum808ModalPads) return;
-    drum808ModalPads.innerHTML = DRUM_808_VOICES.map(v => `
-      <button type="button" class="drum808-pad" data-note="${v.note}" title="${v.label} - MIDI ${v.note}">
+    const PM = window.WAWPadMap;
+    drum808ModalPads.innerHTML = DRUM_808_VOICES.map((v, i) => `
+      <button type="button" class="drum808-pad${PM?.learn.mode && PM.learn.pad === i ? " learning" : ""}" data-note="${v.note}" data-pad="${i}" title="${v.label} · MIDI ${PM?.midiLabel(i, "808") ?? v.note} · key ${PM?.keyLabel(i) ?? v.key}">
         <span>${v.label}</span>
-        <small>${v.key}</small>
+        <small>${PM?.keyLabel(i) ?? v.key} · ${PM?.midiLabel(i, "808") ?? v.note}</small>
       </button>
     `).join("");
     attach808PadEvents(drum808ModalPads);
+    // controller mapping toolbar above the pads
+    if (PM) {
+      drum808ModalPads.parentElement?.querySelector(".padmap-bar")?.remove();
+      drum808ModalPads.insertAdjacentHTML("beforebegin", PM.toolbarHtml());
+      PM.attachToolbar(drum808ModalPads.parentElement, () => 0);
+    }
   }
 
 
@@ -7446,10 +7454,12 @@ function animateRecordingTransport() {
     const note = data1;
     const vel = data2;
 
+    const PM = window.WAWPadMap;
     if (cmd === 0x90 && vel > 0) {
-      midiNoteOn(note, vel);
+      if (PM?.handleMidiLearn(note)) return;           // pad MIDI Learn
+      midiNoteOn(PM ? PM.translate(note) : note, vel); // controller pad -> pad note
     } else if (cmd === 0x80 || (cmd === 0x90 && vel === 0)) {
-      midiNoteOff(note);
+      midiNoteOff(PM ? PM.translate(note) : note);
     }
   }
 
@@ -7506,13 +7516,17 @@ function animateRecordingTransport() {
   }
 
   window.addEventListener("keydown", (e) => {
-    if (currentView !== "editor" && currentView !== "sequencer") return;
-    if (isTypingTarget(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (isTypingTarget(e.target)) return;
+    if (window.WAWPadMap?.handleKeyLearn(e)) return; // pad Key Learn
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (document.querySelector(".modal-backdrop.visible:not(#synthModal):not(#drum808Modal):not(#samplerModal)")) return;
 
     const activeInst = getActiveTrack()?.type === "audio" ? null : getActiveTrack()?.instrument;
+    // pads can be played from every view (arrange, editor, mixer)
+    if (currentView !== "editor" && currentView !== "sequencer" && activeInst !== "808" && activeInst !== "sampler") return;
     if (activeInst === "808" || activeInst === "sampler") {
-      const padNote = (activeInst === "808" ? COMPUTER_808_KEY_MAP : COMPUTER_SAMPLER_KEY_MAP)[e.code];
+      const padNote = window.WAWPadMap ? window.WAWPadMap.keyNote(e.code)
+        : (activeInst === "808" ? COMPUTER_808_KEY_MAP : COMPUTER_SAMPLER_KEY_MAP)[e.code];
       if (padNote == null || e.repeat) return;
       e.preventDefault();
       if (activeInst === "808") { trigger808PadNote(padNote, e.shiftKey ? 127 : 112); return; }

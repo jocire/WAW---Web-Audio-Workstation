@@ -225,8 +225,12 @@
       const p = track.samplerPatch.pads[i];
       const sel = track.samplerPatch.selected === i ? " selected" : "";
       const empty = p.sampleId ? "" : " empty";
-      return `<button type="button" class="smp-pad${sel}${empty}" data-track="${escapeHtml(track.id)}" data-pad="${i}" title="Pad ${i + 1} · note ${BASE_NOTE + i} · key ${PAD_KEY_LABELS[i]}">
-        <span class="smp-num">${i + 1}</span><span class="smp-key">${PAD_KEY_LABELS[i]}</span><span class="smp-name">${escapeHtml(p.sampleId ? p.name : "—")}</span></button>`;
+      const PM = window.WAWPadMap;
+      const key = PM ? PM.keyLabel(i) : PAD_KEY_LABELS[i];
+      const midi = PM ? PM.midiLabel(i, "sampler") : String(BASE_NOTE + i);
+      const learning = PM?.learn.mode && PM.learn.pad === i ? " learning" : "";
+      return `<button type="button" class="smp-pad${sel}${empty}${learning}" data-track="${escapeHtml(track.id)}" data-pad="${i}" title="Pad ${i + 1} · MIDI ${midi}${PM?.isLearned(i) ? " (learned)" : ""} · key ${key}">
+        <span class="smp-num">${i + 1}</span><span class="smp-key">${escapeHtml(key)}</span><span class="smp-midi">${escapeHtml(midi)}</span><span class="smp-name">${escapeHtml(p.sampleId ? p.name : "—")}</span></button>`;
     }).join("")}</div>`;
   }
 
@@ -236,6 +240,7 @@
       el.addEventListener("pointerdown", (e) => {
         if (e.button !== 0) return;
         e.stopPropagation();
+        window.WAWPadMap?.setLearnPad(idx); // in learn mode: choose the pad to map
         const note = BASE_NOTE + idx;
         midiNoteOn(note, 110);
         const up = () => { midiNoteOff(note); window.removeEventListener("pointerup", up); };
@@ -343,8 +348,10 @@
         <button type="button" data-act="multi">Load Files…</button>
         <button type="button" data-act="clearkit">Clear Kit</button>
       </div>
-      <p class="smp-hint">Click/hold pads or play keys Z–V, A–F, Q–R, 1–4. Drop audio files on pads. Right-click a pad to clear it. MIDI notes 36–51.</p>`;
+      ${window.WAWPadMap ? window.WAWPadMap.toolbarHtml() : ""}
+      <p class="smp-hint">Click/hold pads, play the keys shown on them, or use your MIDI controller (notes 36–51 by default; MIDI Learn maps any controller). Drop audio files on pads. Right-click a pad to clear it.</p>`;
     attachPadEvents(left, t);
+    window.WAWPadMap?.attachToolbar(left, () => t.samplerPatch.selected || 0);
     left.querySelector('[data-act="kit"]').addEventListener("click", async () => {
       pushHistory();
       statusEl.textContent = "Rendering drum synth kit…";
@@ -565,6 +572,22 @@
     sel("choke", "Choke", [[0, "None"], [1, "Group 1"], [2, "Group 2"], [3, "Group 3"], [4, "Group 4"]]);
     sel("reverse", "Direction", [["false", "Forward"], ["true", "Reverse"]]);
   }
+
+  // re-label pads when the controller mapping or learn state changes
+  window.WAWPadMap?.onChange(() => {
+    if (modal?.classList.contains("visible") && currentTrack) {
+      const left = modal.querySelector("#smpLeft");
+      const grid = left?.querySelector(".smp-grid");
+      if (grid) {
+        grid.outerHTML = padGridHtml(currentTrack);
+        attachPadEvents(left, currentTrack);
+        const bar = left.querySelector(".padmap-bar");
+        if (bar) { bar.outerHTML = window.WAWPadMap.toolbarHtml(); window.WAWPadMap.attachToolbar(left, () => currentTrack.samplerPatch.selected || 0); }
+      }
+    }
+    if (typeof drum808Modal !== "undefined" && drum808Modal?.classList.contains("visible") && typeof render808ModalPads === "function") render808ModalPads();
+    if (typeof renderSidebarTracks === "function") renderSidebarTracks();
+  });
 
   window.WAWSampler = {
     PAD_COUNT, BASE_NOTE, defaultPad, normalizeTrack, scheduleNote, previewOn, previewOff,

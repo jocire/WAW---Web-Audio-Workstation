@@ -416,3 +416,12 @@ body.collab-open header, body.collab-open .app, body.collab-open .global-footer 
 .arr-section { cursor: grab; }
 .arr-section.dragging { cursor: grabbing; filter: brightness(1.35); z-index: 2; }
 .arr-resize { position: absolute; right: 0; top: 0; bottom: 0; width: 7px; cursor: ew-resize; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.45)); }
+
+/* ---------------- pad controller mapping ---------------- */
+.padmap-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 8px 0 4px; }
+.padmap-title { font-size: 11px; font-weight: 600; opacity: 0.8; margin-right: 2px; }
+.padmap-bar button { font-size: 11px; padding: 3px 8px; }
+.padmap-bar button.on { background: #e11d48 !important; color: #fff !important; animation: padmapBlink 1s steps(2) infinite; }
+@keyframes padmapBlink { 50% { opacity: 0.7; } }
+.smp-pad .smp-midi { position: absolute; right: 4px; bottom: 3px; font: 9px ui-monospace, monospace; opacity: 0.55; }
+.smp-pad.learning, .drum808-pad.learning { outline: 3px solid #e11d48 !important; outline-offset: 1px; animation: padmapBlink 0.8s steps(2) infinite; }

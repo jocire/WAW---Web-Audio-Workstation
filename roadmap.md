@@ -62,7 +62,9 @@ WAV export, so what you hear is what you export.
 - Drum Synth: 16 voices modelled after analog circuits (bridged-T resonators, six-oscillator
   metal bank for hats/cymbal, two-oscillator cowbell, multi-trigger clap), per-voice
   tune/decay/level, stereo spread. No samples.
-- Sampler: 16 pads (MIDI 36–51, keys Z–V/A–F/Q–R/1–4), per-pad region, tune/fine, gain,
+- Pad controller mapping (Sampler + Drum Synth): MIDI Learn and Key Learn per pad, saved in
+  the browser; notes are translated to the pad's own note so recordings stay portable.
+- Sampler: 16 pads (MIDI 36–51 by default, keys Z–V/A–F/Q–R/1–4 by default), per-pad region, tune/fine, gain,
   pan, attack/release, filter, one-shot/gate/loop, reverse, choke groups, velocity
   sensitivity; load/drag-drop/record audio, normalize, crop, fades, chop to 16 pads
   (equal or by transients), render the Drum Synth into a kit.
