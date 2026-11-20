@@ -255,9 +255,9 @@
     pushHistory();
     const p = position(sec);
     const start = barToSec(p.bar);
-    // a new section is 4 bars long (or up to the next marker); resize it with its right edge
+    // a new section is 1 bar long (or up to the next marker); stretch it with its right edge
     const next = state.markers.filter(m => m.sec > start + 1e-6).sort((a, b) => a.sec - b.sec)[0];
-    const end = Math.min(barToSec(p.bar + 4), next ? next.sec : Infinity);
+    const end = Math.min(barToSec(p.bar + 1), next ? next.sec : Infinity);
     state.markers.push({ id: uid(), sec: start, end, name: name || `Section ${state.markers.length + 1}`, color: MARKER_COLORS[state.markers.length % MARKER_COLORS.length] });
     state.markers.sort((a, b) => a.sec - b.sec);
     changed();
@@ -292,11 +292,11 @@
     row.className = "seq-track-row seq-extra-row seq-global-row";
     row.innerHTML = `
       <div class="seq-row-label seq-global-label">
-        <div class="seq-label-top"><span class="seq-label-name">Tempo · Meter · Arranger</span></div>
-        <div class="seq-label-btns">
-          <button type="button" data-g="tempo" title="Add a tempo change at the playhead">+ Tempo</button>
-          <button type="button" data-g="sig" title="Add a time signature change at the playhead">+ Meter</button>
-          <button type="button" data-g="marker" title="Add an arranger marker at the playhead">+ Marker</button>
+        <div class="seq-label-top"><span class="seq-label-name">Tempo · Meter · Markers</span></div>
+        <div class="seq-label-btns gl-btns">
+          <button type="button" data-g="tempo" title="Add a tempo change at the playhead" aria-label="Add tempo change">${window.WAWIcons?.tempo || "♩"}</button>
+          <button type="button" data-g="sig" title="Add a time signature change at the playhead" aria-label="Add meter change">${window.WAWIcons?.meter || "4/4"}</button>
+          <button type="button" data-g="marker" title="Add an arranger marker at the playhead" aria-label="Add marker">${window.WAWIcons?.marker || "⚑"}</button>
         </div>
       </div>
       <div class="seq-row-lane seq-global-lane"></div>`;

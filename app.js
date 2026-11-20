@@ -172,6 +172,7 @@ function renderSequencer() {
   const laneWidthPx = songLen * pxPerSec;
 
   window.WAWTempo?.buildGlobalRow(sequencerGrid, { pxPerSec, laneWidthPx });
+  window.WAWWorkspace?.syncZoomBar?.();
 
   tracks.forEach((t, ti) => {
     if (!t.color) t.color = getTrackColor(ti);
@@ -189,9 +190,9 @@ function renderSequencer() {
         <div class="seq-label-btns">
           <button type="button" class="tb-m ${t.mute ? "on" : ""}" data-tb="mute" title="Mute">M</button>
           <button type="button" class="tb-s ${t.solo ? "on" : ""}" data-tb="solo" title="Solo">S</button>
-          <button type="button" class="tb-r ${t.armed ? "on" : ""}" data-tb="arm" title="Record arm">R</button>
-          ${t.type === "audio" ? `<button type="button" class="tb-i ${t.monitor ? "on" : ""}" data-tb="monitor" title="Input monitoring">I</button>` : ""}
-          <button type="button" class="tb-a ${t.automation?.show ? "on" : ""} ${(t.automation?.lanes || []).some(l => l.points.length) ? "has" : ""}" data-tb="auto" title="Show automation lanes">A</button>
+          <button type="button" class="tb-r ${t.armed ? "on" : ""}" data-tb="arm" title="Record arm" aria-label="Record arm">${window.WAWIcons?.record || "R"}</button>
+          ${t.type === "audio" ? `<button type="button" class="tb-i ${t.monitor ? "on" : ""}" data-tb="monitor" title="Input monitoring" aria-label="Input monitoring">${window.WAWIcons?.monitor || "I"}</button>` : ""}
+          <button type="button" class="tb-a ${t.automation?.show ? "on" : ""} ${(t.automation?.lanes || []).some(l => l.points.length) ? "has" : ""}" data-tb="auto" title="Show automation lanes" aria-label="Automation lanes">${window.WAWIcons?.automation || "A"}</button>
         </div>
       </div>
       <div class="seq-row-lane"></div>
@@ -876,7 +877,7 @@ sequencerGrid?.addEventListener("wheel", (e) => {
 
     const before = seqPxPerBeat;
     const factor = (e.deltaY > 0) ? 0.9 : 1.1;
-    seqPxPerBeat = Math.min(200, Math.max(20, seqPxPerBeat * factor));
+    seqPxPerBeat = Math.min(200, Math.max(4, seqPxPerBeat * factor)); // 4 = whole songs fit (zoom bar "Fit")
     if (before === seqPxPerBeat) return;
 
     renderSequencer();
@@ -1495,6 +1496,7 @@ function restoreSnapshot(snap) {
     if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
     redoStack.length = 0;
     updateUndoRedoButtons();
+    window.WAWStatusBar?.markDirty();
     // every undoable edit is also a candidate for sharing with collaborators
     window.WAWCollab?.notifyChange?.();
   }
@@ -7167,6 +7169,7 @@ function animateRecordingTransport() {
     }
     setActiveProject(item);
     renderProjectsLibrary();
+    window.WAWStatusBar?.markSaved();
     if (!silent) {
       statusEl.textContent = existingItem
         ? `Saved "${projectName}".`
@@ -7301,6 +7304,7 @@ function animateRecordingTransport() {
     activeClipId = null;
     selectedClipRef = null;
     updateUndoRedoButtons();
+    window.WAWStatusBar?.markSaved();
     if (payload.bpm && bpmInput) bpmInput.value = payload.bpm;
     if (payload.synthState && !tracks.some(t => t.synthPatch)) {
       const activeTrack = getActiveTrack();
@@ -7449,6 +7453,7 @@ function animateRecordingTransport() {
 
   function handleMIDIMessage(event) {
     if (window.WAWWorkspace && !window.WAWWorkspace.acceptMidi(event)) return;
+    window.WAWStatusBar?.midiActivity();
     const [status, data1, data2] = event.data;
     const cmd = status & 0xf0;
     const note = data1;
