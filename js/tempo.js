@@ -5,8 +5,8 @@
 //   beat = quarter note, counted from the song start (beat 0 = bar 1).
 //   tempos: [{ beat, bpm }]   constant tempo from each point to the next
 //   sigs:   [{ bar, num, den }] time signature from bar `bar` (1-based)
-//   markers:[{ id, sec, name, color }]  a marker starts an arranger section
-//            that runs to the next marker (or the song end)
+//   markers:[{ id, sec, end?, name, color }]  a marker starts an arranger
+//            section; it ends at `end` (resizable) or at the next marker
 // When the map is edited, every stored time is re-mapped so content keeps its
 // bar/beat position (remapTimes in app.js), exactly like a BPM change.
 (function () {
@@ -35,7 +35,12 @@
     if (!sigs.length || sigs[0].bar > 1) sigs.unshift({ bar: 1, num: 4, den: 4 });
     out.sigs = sigs.filter((g, i) => i === sigs.length - 1 || sigs[i + 1].bar !== g.bar);
     out.markers = (Array.isArray(s.markers) ? s.markers : [])
-      .map((m, i) => ({ id: String(m.id || uid()), sec: Math.max(0, Number(m.sec) || 0), name: String(m.name || `Section ${i + 1}`).slice(0, 40), color: /^#[0-9a-f]{6}$/i.test(m.color) ? m.color : MARKER_COLORS[i % MARKER_COLORS.length] }))
+      .map((m, i) => {
+        const sec = Math.max(0, Number(m.sec) || 0);
+        const out = { id: String(m.id || uid()), sec, name: String(m.name || `Section ${i + 1}`).slice(0, 40), color: /^#[0-9a-f]{6}$/i.test(m.color) ? m.color : MARKER_COLORS[i % MARKER_COLORS.length] };
+        if (Number.isFinite(Number(m.end)) && Number(m.end) > sec) out.end = Number(m.end);
+        return out;
+      })
       .sort((a, b) => a.sec - b.sec);
     return out;
   }
@@ -195,7 +200,7 @@
     const map = remapper(old, next);
     state = next; invalidate();
     // markers are stored in seconds too: keep their bar position
-    state.markers.forEach(m => { m.sec = map(m.sec); });
+    state.markers.forEach(m => { m.sec = map(m.sec); if (m.end != null) m.end = map(m.end); });
     if (typeof remapAllTimes === "function") remapAllTimes(map, old, next);
     syncBpmField();
     window.WAWCollab?.notifyChange?.();
@@ -249,7 +254,11 @@
   function addMarker(sec, name) {
     pushHistory();
     const p = position(sec);
-    state.markers.push({ id: uid(), sec: barToSec(p.bar), name: name || `Section ${state.markers.length + 1}`, color: MARKER_COLORS[state.markers.length % MARKER_COLORS.length] });
+    const start = barToSec(p.bar);
+    // a new section is 4 bars long (or up to the next marker); resize it with its right edge
+    const next = state.markers.filter(m => m.sec > start + 1e-6).sort((a, b) => a.sec - b.sec)[0];
+    const end = Math.min(barToSec(p.bar + 4), next ? next.sec : Infinity);
+    state.markers.push({ id: uid(), sec: start, end, name: name || `Section ${state.markers.length + 1}`, color: MARKER_COLORS[state.markers.length % MARKER_COLORS.length] });
     state.markers.sort((a, b) => a.sec - b.sec);
     changed();
   }
@@ -260,7 +269,12 @@
   /** arranger section = marker .. next marker (or the end of the content) */
   function sections() {
     const end = Math.max(typeof getBaseDuration === "function" ? getBaseDuration() : 0, ...state.markers.map(m => m.sec + 1));
-    return state.markers.map((m, i) => ({ ...m, start: m.sec, end: state.markers[i + 1]?.sec ?? contentEnd(end) }));
+    return state.markers.map((m, i) => {
+      const nextStart = state.markers[i + 1]?.sec;
+      const auto = nextStart ?? contentEnd(end);
+      const e = m.end != null ? Math.min(m.end, nextStart ?? Infinity) : auto;
+      return { ...m, start: m.sec, end: Math.max(m.sec + 0.01, e) };
+    });
   }
   function contentEnd(fallback) {
     let e = 0;
@@ -307,9 +321,9 @@
       el.style.left = x(sec.start) + "px";
       el.style.width = Math.max(4, x(sec.end) - x(sec.start)) + "px";
       el.style.setProperty("--c", sec.color);
-      el.title = `${sec.name}: click = loop section, double-click = rename, right-click = arranger menu`;
-      el.innerHTML = `<span>${escapeHtml(sec.name)}</span>`;
-      el.addEventListener("click", (e) => { e.stopPropagation(); loopSection(sec); });
+      el.title = `${sec.name}: drag = move, drag right edge = resize, click = loop, double-click = rename, right-click = arranger menu`;
+      el.innerHTML = `<span>${escapeHtml(sec.name)}</span><div class="arr-resize" title="Drag to change the section length"></div>`;
+      el.addEventListener("click", (e) => { e.stopPropagation(); if (el.dataset.dragged) { delete el.dataset.dragged; return; } loopSection(sec); });
       el.addEventListener("dblclick", (e) => { e.stopPropagation(); const v = prompt("Section name:", sec.name); if (v && v.trim()) renameMarker(sec.id, v.trim()); });
       el.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); sectionMenu(sec, e.clientX, e.clientY); });
       dragMarker(el, sec, pxPerSec);
@@ -364,23 +378,47 @@
     setSigAt(bar, num, den);
   }
 
+  /** move a section (drag its body) or resize it (drag its right edge); snapped to bars */
   function dragMarker(el, sec, pxPerSec) {
     el.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0 || e.offsetX > 10) return; // drag by the left edge
+      if (e.button !== 0) return;
       e.preventDefault(); e.stopPropagation();
       const m = state.markers.find(x => x.id === sec.id);
       if (!m) return;
-      beginHistoryGesture();
-      const x0 = e.clientX, s0 = m.sec;
+      const resizing = !!e.target.closest(".arr-resize");
+      const x0 = e.clientX;
+      const s0 = m.sec, e0 = sec.end, len0 = sec.end - sec.start;
+      const startBar = position(s0).bar;
+      const lenBars = Math.max(1, position(e0 - 1e-6).bar + 1 - startBar);
+      let moved = false;
       try { el.setPointerCapture(e.pointerId); } catch (_) {}
-      const move = (ev) => { m.sec = Math.max(0, barToSec(position(s0 + (ev.clientX - x0) / pxPerSec).bar)); el.style.left = m.sec * pxPerSec + "px"; };
+      const move = (ev) => {
+        const dx = ev.clientX - x0;
+        if (!moved && Math.abs(dx) < 4) return;
+        if (!moved) { moved = true; beginHistoryGesture(); el.classList.add("dragging"); }
+        if (resizing) {
+          const endBar = Math.max(startBar + 1, position(e0 + dx / pxPerSec + 0.5 * (barToSec(startBar + 1) - barToSec(startBar))).bar);
+          m.end = barToSec(endBar);
+          el.style.width = Math.max(4, (m.end - m.sec) * pxPerSec) + "px";
+        } else {
+          const bar = Math.max(1, position(Math.max(0, s0 + dx / pxPerSec) + 0.5 * (barToSec(startBar + 1) - barToSec(startBar))).bar);
+          m.sec = barToSec(bar);
+          m.end = barToSec(bar + lenBars);
+          el.style.left = m.sec * pxPerSec + "px";
+          el.style.width = Math.max(4, (m.end - m.sec) * pxPerSec) + "px";
+        }
+      };
       const up = () => {
-        el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up);
-        if (m.sec === s0) { cancelHistoryGesture(); return; }
-        state.markers.sort((a, b) => a.sec - b.sec);
+        el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); el.removeEventListener("pointercancel", up);
+        el.classList.remove("dragging");
+        if (!moved) return; // a click: loops the section
+        el.dataset.dragged = "1";
+        if (m.sec === s0 && Math.abs((m.end ?? e0) - e0) < 1e-6) { cancelHistoryGesture(); return; }
+        state.markers.sort((a2, b2) => a2.sec - b2.sec);
+        void len0;
         commitHistoryGesture(); changed();
       };
-      el.addEventListener("pointermove", move); el.addEventListener("pointerup", up);
+      el.addEventListener("pointermove", move); el.addEventListener("pointerup", up); el.addEventListener("pointercancel", up);
     });
   }
 
@@ -416,7 +454,7 @@
       if (cutStart != null) t.notes = (t.notes || []).filter(n => !(n.startSec >= cutStart - 1e-6 && n.startSec < cutEnd - 1e-6));
       window.WAWAutomation?.shiftTrack?.(t, at, delta, cutStart, cutEnd);
     });
-    state.markers.forEach(m => { m.sec = shift(m.sec); });
+    state.markers.forEach(m => { m.sec = shift(m.sec); if (m.end != null) m.end = shift(m.end); });
     if (loopEndSec > loopStartSec) { loopStartSec = shift(loopStartSec); loopEndSec = shift(loopEndSec); }
   }
 
@@ -446,7 +484,7 @@
         window.WAWAutomation?.copyRange?.(t, sec.start, sec.end, len);
       });
       const i = state.markers.findIndex(m => m.id === sec.id);
-      state.markers.splice(i + 1, 0, { id: uid(), sec: sec.end, name: sec.name + " (copy)", color: sec.color });
+      state.markers.splice(i + 1, 0, { id: uid(), sec: sec.end, end: sec.end + len, name: sec.name + " (copy)", color: sec.color });
       state.markers.sort((a, b) => a.sec - b.sec);
     }
     afterArrange(`Duplicated "${sec.name}".`);

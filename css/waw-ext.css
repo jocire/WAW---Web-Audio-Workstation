@@ -412,3 +412,7 @@ body.collab-open header, body.collab-open .app, body.collab-open .global-footer 
 /* live recording clip (waveform painted while recording) */
 .seq-clip.rec-live { background: linear-gradient(180deg, rgba(220,38,38,0.55), rgba(127,29,29,0.8)) !important; border-color: #ef4444 !important; pointer-events: none; z-index: 3; }
 .seq-clip.rec-live .clip-title { color: #fff; }
+
+.arr-section { cursor: grab; }
+.arr-section.dragging { cursor: grabbing; filter: brightness(1.35); z-index: 2; }
+.arr-resize { position: absolute; right: 0; top: 0; bottom: 0; width: 7px; cursor: ew-resize; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.45)); }

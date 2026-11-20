@@ -509,11 +509,15 @@
       g.fillStyle = "rgba(255,255,255,0.85)";
       const nBlocks = Math.max(1, Math.floor((dur * rate) / block));
       const mid = h / 2;
+      // display zoom for quiet inputs (like the clip waveforms)
+      let maxAbs = 0;
+      for (let b = fromPeak; b < fromPeak + nBlocks && b * 2 + 1 < peaks.length; b++) maxAbs = Math.max(maxAbs, -peaks[b * 2], peaks[b * 2 + 1]);
+      const zoom = maxAbs > 1e-5 ? Math.min(16, Math.max(1, 0.9 / maxAbs)) : 1;
       for (let x = 0; x < w; x++) {
         const b0 = fromPeak + Math.floor((x / w) * nBlocks), b1 = fromPeak + Math.max(Math.floor(((x + 1) / w) * nBlocks), Math.floor((x / w) * nBlocks) + 1);
         let mn = 0, mx = 0;
         for (let b = b0; b < b1 && b * 2 + 1 < peaks.length; b++) { if (peaks[b * 2] < mn) mn = peaks[b * 2]; if (peaks[b * 2 + 1] > mx) mx = peaks[b * 2 + 1]; }
-        const y1 = mid - Math.min(1, mx) * mid, y2 = mid - Math.max(-1, mn) * mid;
+        const y1 = mid - Math.min(1, mx * zoom) * mid, y2 = mid - Math.max(-1, mn * zoom) * mid;
         g.fillRect(x, y1, 1, Math.max(1, y2 - y1));
       }
     });
@@ -718,7 +722,7 @@
     if (!S().has(a.sampleId)) { S().load(a.sampleId).then(b => b && canvas.isConnected && drawClipWave(canvas, clip, color)); return; }
     const k = window.WAWWarp ? window.WAWWarp.factor(clip) : 1;
     const len = clip.endSec - clip.startSec;
-    const opts = { color: color || "rgba(255,255,255,0.8)", gain: Math.pow(10, (a.gain || 0) / 20) };
+    const opts = { color: color || "rgba(255,255,255,0.8)", gain: Math.pow(10, (a.gain || 0) / 20), autoZoom: true };
     const segs = window.WAWComp?.hasTakes(clip) && clip.comp?.length ? window.WAWComp.segments(clip) : null;
     if (!segs) { S().drawWaveform(canvas, a.sampleId, { ...opts, start: a.offset, end: a.offset + len / k }); return; }
     // comp: draw each segment from its take

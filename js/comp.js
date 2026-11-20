@@ -107,7 +107,7 @@
         el.innerHTML = `<canvas></canvas>${used.map(s => `<div class="take-used" style="left:${(s.start / len) * 100}%;width:${((s.end - s.start) / len) * 100}%"></div>`).join("")}<span class="take-name">${escapeHtml(take.name || `Take ${r + 1}`)}</span><div class="take-sel"></div>`;
         lane.appendChild(el);
         const canvas = el.querySelector("canvas");
-        const draw = () => S().drawWaveform(canvas, take.sampleId, { start: take.offset, end: take.offset + len / k(c), color: "rgba(255,255,255,0.55)" });
+        const draw = () => S().drawWaveform(canvas, take.sampleId, { start: take.offset, end: take.offset + len / k(c), color: "rgba(255,255,255,0.55)", autoZoom: true });
         requestAnimationFrame(() => { if (S().has(take.sampleId)) draw(); else S().load(take.sampleId).then(b => b && canvas.isConnected && draw()); });
         attachSwipe(el, c, r, len, pxPerSec);
       });
