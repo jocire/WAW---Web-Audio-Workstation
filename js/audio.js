@@ -302,6 +302,16 @@
     const node = window.WAWFX.makeWorklet(ctx, "waw-recorder", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: "explicit" });
     const wChunks = [[], []];
     let wStartedAt = null, resolveStop = null;
+    const PEAK_BLOCK = 256;
+    const livePeaks = { worklet: [], backup: [] }; // [min, max, min, max, ...]
+    const addPeaks = (arr, d) => {
+      for (let i = 0; i < d.length; i += PEAK_BLOCK) {
+        let mn = 0, mx = 0;
+        const end = Math.min(d.length, i + PEAK_BLOCK);
+        for (let j = i; j < end; j++) { const v = d[j]; if (v < mn) mn = v; if (v > mx) mx = v; }
+        arr.push(mn, mx);
+      }
+    };
     if (node) {
       diag.worklet = true;
       node.port.onmessage = (e) => {
@@ -310,7 +320,7 @@
         else if (m.type === "data") m.channels.forEach((c, i) => {
           if (i >= 2) return;
           wChunks[i].push(c);
-          if (i === 0) diag.workletFrames += c.length;
+          if (i === 0) { diag.workletFrames += c.length; addPeaks(livePeaks.worklet, c); }
           for (let k = 0; k < c.length; k += 16) { const v = Math.abs(c[k]); if (v > diag.workletPeak) diag.workletPeak = v; }
         });
         else if (m.type === "stopped") resolveStop?.();
@@ -337,6 +347,7 @@
           bChunks[ch].push(d);
           if (ch === 0) {
             diag.backupFrames += d.length;
+            addPeaks(livePeaks.backup, d);
             for (let k = 0; k < d.length; k += 16) { const v = Math.abs(d[k]); if (v > diag.backupPeak) diag.backupPeak = v; }
           }
         }
@@ -368,6 +379,8 @@
     const useBackup = () => !diag.workletFrames || (diag.workletPeak < 1e-4 && diag.backupPeak > 1e-3);
     return {
       diag,
+      /** waveform of what has been captured so far: { peaks:[min,max,...], block, rate } */
+      live() { return { peaks: useBackup() ? livePeaks.backup : livePeaks.worklet, block: PEAK_BLOCK, rate: ctx.sampleRate }; },
       get startedAt() { return useBackup() ? bStartedAt : wStartedAt; },
       get peak() { return useBackup() ? diag.backupPeak : diag.workletPeak; },
       async stop() {
@@ -424,6 +437,7 @@
       }
       if (!items.length) { takes = null; return false; }
       takes = { items, recordingStartTime, recordingBaseSec, recordingLoopLen };
+      startLivePaint();
       statusEl.textContent = `Recording audio on ${items.map(i => i.track.name).join(", ")}…`;
       return true;
     })();
@@ -432,6 +446,78 @@
   }
 
   function isRecordingAudio() { return !!takes || !!pendingBegin; }
+
+  // ---------------------------------------------------------------------------
+  // Live recording clip: a growing clip with the waveform painted while recording
+  // ---------------------------------------------------------------------------
+  let liveTimer = null;
+  function startLivePaint() {
+    stopLivePaint();
+    liveTimer = setInterval(paintLive, 80);
+  }
+  function stopLivePaint() {
+    clearInterval(liveTimer); liveTimer = null;
+    document.querySelectorAll(".seq-clip.rec-live").forEach(el => el.remove());
+  }
+  function paintLive() {
+    const t = takes;
+    if (!t) return;
+    const ctx = ensureAudioContext();
+    const pxPerSec = typeof getSeqPxPerSec === "function" ? getSeqPxPerSec() : 100;
+    const latency = (ctx.baseLatency || 0) + (ctx.outputLatency || 0) + settings().latency / 1000;
+    const base = Number.isFinite(t.recordingBaseSec) ? t.recordingBaseSec : 0;
+    t.items.forEach(({ track, capture }) => {
+      const ti = tracks.indexOf(track);
+      // the track's own row (not its automation / take lanes)
+      const lane = document.querySelector(`.seq-track-row:not(.seq-extra-row)[data-track-index="${ti}"] .seq-row-lane`);
+      if (!lane) return;
+      const { peaks, block, rate } = capture.live();
+      const frames = (peaks.length / 2) * block;
+      const startedAt = Number.isFinite(capture.startedAt) ? capture.startedAt : t.recordingStartTime;
+      let songStart = base + (startedAt - t.recordingStartTime) - latency;
+      let dur = frames / rate;
+      let fromPeak = 0;
+      if (songStart < 0) { fromPeak = Math.floor((-songStart * rate) / block); dur += songStart; songStart = 0; }
+      const L = t.recordingLoopLen;
+      if (L > 0) {
+        // cycle recording: show the pass being recorded now
+        const into = Math.max(0, songStart + dur - base);
+        const pass = Math.floor(into / L);
+        const passStartSong = base + pass * L;
+        const startSong = Math.max(songStart, pass === 0 ? songStart : base);
+        fromPeak += Math.max(0, Math.floor(((passStartSong - songStart) * rate) / block));
+        dur = into - pass * L - (startSong - base);
+        songStart = startSong;
+      }
+      if (dur <= 0) return;
+      let el = lane.querySelector(".seq-clip.rec-live");
+      if (!el) {
+        el = document.createElement("div");
+        el.className = "seq-clip audio rec-live";
+        el.innerHTML = `<canvas class="clip-thumb"></canvas><div class="clip-title">● Recording ${escapeHtml(track.name)}</div>`;
+        lane.appendChild(el);
+      }
+      el.style.left = songStart * pxPerSec + "px";
+      el.style.width = Math.max(2, dur * pxPerSec) + "px";
+      const canvas = el.querySelector("canvas");
+      const w = Math.max(1, Math.floor(el.clientWidth)), h = Math.max(1, Math.floor(el.clientHeight));
+      const dpr = window.devicePixelRatio || 1;
+      if (canvas.width !== Math.floor(w * dpr) || canvas.height !== Math.floor(h * dpr)) { canvas.width = Math.floor(w * dpr); canvas.height = Math.floor(h * dpr); }
+      const g = canvas.getContext("2d");
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, w, h);
+      g.fillStyle = "rgba(255,255,255,0.85)";
+      const nBlocks = Math.max(1, Math.floor((dur * rate) / block));
+      const mid = h / 2;
+      for (let x = 0; x < w; x++) {
+        const b0 = fromPeak + Math.floor((x / w) * nBlocks), b1 = fromPeak + Math.max(Math.floor(((x + 1) / w) * nBlocks), Math.floor((x / w) * nBlocks) + 1);
+        let mn = 0, mx = 0;
+        for (let b = b0; b < b1 && b * 2 + 1 < peaks.length; b++) { if (peaks[b * 2] < mn) mn = peaks[b * 2]; if (peaks[b * 2 + 1] > mx) mx = peaks[b * 2 + 1]; }
+        const y1 = mid - Math.min(1, mx) * mid, y2 = mid - Math.max(-1, mn) * mid;
+        g.fillRect(x, y1, 1, Math.max(1, y2 - y1));
+      }
+    });
+  }
 
   /** song placement of a take; cycle recordings return every complete pass */
   function placeTake(buf, startedAt, t) {
@@ -469,6 +555,7 @@
     if (pendingBegin) await pendingBegin;
     if (!takes) return;
     const t = takes; takes = null;
+    stopLivePaint();
     const results = [];
     for (const { track, capture } of t.items) {
       const startedAt = capture.startedAt ?? t.recordingStartTime;
