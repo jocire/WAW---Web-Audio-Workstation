@@ -419,6 +419,8 @@
     rtGraph = new MixGraph(ctx, { realtime: true });
     rtGraph.syncAll();
     old?.dispose();
+    // live-input monitoring taps pointed at the old channel strips
+    window.WAWAudio?.resetMonitoring?.();
   }
 
   function getTrackInput(trackOrId) {
@@ -505,25 +507,35 @@
     knob.addEventListener("wheel", (e) => {
       e.preventDefault(); e.stopPropagation();
       const n = toNorm(value, min, max, log) + (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 0.005 : 0.025);
-      setValue(fromNorm(n, min, max, log));
-      scheduleWheelCommit();
+      stepEdit(() => setValue(fromNorm(n, min, max, log)), () => value);
     }, { passive: false });
     knob.addEventListener("keydown", (e) => {
       if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
       e.preventDefault(); e.stopPropagation();
       const dir = e.key === "ArrowUp" || e.key === "ArrowRight" ? 1 : -1;
-      setValue(fromNorm(toNorm(value, min, max, log) + dir * 0.02, min, max, log));
+      stepEdit(() => setValue(fromNorm(toNorm(value, min, max, log) + dir * 0.02, min, max, log)), () => value);
     });
     render();
     wrap.setValue = (v) => { value = v; render(); };
     return wrap;
   }
 
-  // wheel edits: coalesce into one undo step + one collab broadcast
+  // wheel / arrow-key edits: a burst of steps becomes one undo step + one collab
+  // broadcast (previously these edits were not undoable at all)
   let wheelTimer = null;
-  function scheduleWheelCommit() {
+  let wheelGesture = false;
+  function stepEdit(apply, read) {
+    const before = read();
+    if (!wheelGesture) beginHistoryGesture?.();
+    apply();
+    if (read() === before) { if (!wheelGesture) cancelHistoryGesture?.(); return; }
+    wheelGesture = true;
     clearTimeout(wheelTimer);
-    wheelTimer = setTimeout(() => onCommit(), 400);
+    wheelTimer = setTimeout(() => {
+      wheelGesture = false;
+      commitHistoryGesture?.();
+      onCommit();
+    }, 400);
   }
   function onCommit() {
     window.WAWCollab?.notifyChange?.();
@@ -603,6 +615,7 @@
       e.preventDefault(); e.stopPropagation();
       try { track.setPointerCapture(e.pointerId); } catch (_) {}
       beginHistoryGesture?.();
+      const startGain = gain;
       const onCap = e.target === cap;
       const startY = e.clientY;
       const startPos = faderDbToPos(gainToDb(gain));
@@ -619,8 +632,8 @@
         track.removeEventListener("pointermove", move);
         track.removeEventListener("pointerup", up);
         track.removeEventListener("pointercancel", up);
-        commitHistoryGesture?.();
-        onCommit();
+        // a click on the cap without moving it is not an edit
+        if (gain !== startGain) { commitHistoryGesture?.(); onCommit(); } else cancelHistoryGesture?.();
         hideValueTip();
       };
       track.addEventListener("pointermove", move);
@@ -631,8 +644,7 @@
     track.addEventListener("wheel", (e) => {
       e.preventDefault();
       const pos = faderDbToPos(gainToDb(gain)) + (e.deltaY < 0 ? 0.01 : -0.01) * (e.shiftKey ? 0.3 : 1);
-      setPos(pos);
-      scheduleWheelCommit();
+      stepEdit(() => setPos(clamp(pos, 0, 1)), () => gain);
     }, { passive: false });
     track.addEventListener("keydown", (e) => {
       if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;

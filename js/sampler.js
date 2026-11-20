@@ -23,9 +23,20 @@
   }
 
   function normalizeTrack(track) {
-    const sp = track.samplerPatch && typeof track.samplerPatch === "object" ? track.samplerPatch : {};
-    const pads = Array.from({ length: PAD_COUNT }, (_, i) => ({ ...defaultPad(i), ...((sp.pads || [])[i] || {}) }));
-    track.samplerPatch = { kitName: sp.kitName || "Empty Kit", selected: clamp(sp.selected ?? 0, 0, 15), pads };
+    // Normalize IN PLACE: this runs on every note and sidebar render, and the pad
+    // editor holds references to the pad objects (replacing them lost knob edits).
+    if (!track.samplerPatch || typeof track.samplerPatch !== "object") track.samplerPatch = {};
+    const sp = track.samplerPatch;
+    if (!Array.isArray(sp.pads)) sp.pads = [];
+    for (let i = 0; i < PAD_COUNT; i++) {
+      const p = sp.pads[i];
+      if (!p || typeof p !== "object") { sp.pads[i] = defaultPad(i); continue; }
+      const def = defaultPad(i);
+      for (const k in def) if (p[k] === undefined) p[k] = def[k];
+    }
+    sp.pads.length = PAD_COUNT;
+    sp.kitName = sp.kitName || "Empty Kit";
+    sp.selected = clamp(Number(sp.selected) || 0, 0, PAD_COUNT - 1);
     return track;
   }
 
@@ -310,6 +321,14 @@
   }
   function close() { modal?.classList.remove("visible"); stopRecording(); }
 
+  /** undo/redo and collaborators replace track objects: re-bind the open editor */
+  function refreshIfStale() {
+    if (!modal?.classList.contains("visible") || !currentTrack) return;
+    const fresh = tracks.find(x => x.id === currentTrack.id);
+    if (!fresh || fresh.instrument !== "sampler") { close(); return; }
+    if (fresh !== currentTrack) { normalizeTrack(fresh); currentTrack = fresh; renderModal(); }
+  }
+
   function renderModal() {
     const t = currentTrack;
     if (!t || !modal) return;
@@ -412,8 +431,9 @@
     act("play", () => { const n = BASE_NOTE + idx; midiNoteOn(n, 110); setTimeout(() => midiNoteOff(n), 600); });
     const destructive = (op) => async () => {
       if (!pad.sampleId) return;
+      const buf = S().get(pad.sampleId) || await S().load(pad.sampleId);
+      if (!buf) { statusEl.textContent = "That pad's audio is not available."; return; }
       pushHistory();
-      const buf = S().get(pad.sampleId);
       const opts = { start: pad.start * buf.duration, end: pad.end * buf.duration };
       const id = await S().edit(pad.sampleId, op, opts);
       if (id) {
@@ -488,6 +508,7 @@
         e.preventDefault();
         try { m.setPointerCapture(e.pointerId); } catch (_) {}
         beginHistoryGesture();
+        const before = pad.start + ":" + pad.end;
         const move = (ev) => {
           const r = wrap.getBoundingClientRect();
           const x = clamp((ev.clientX - r.left) / r.width, 0, 1);
@@ -498,10 +519,11 @@
           if (buf) right.querySelector(".smp-dur").textContent = `${(buf.duration * (pad.end - pad.start)).toFixed(2)} s of ${buf.duration.toFixed(2)} s`;
         };
         const up = () => {
-          m.removeEventListener("pointermove", move); m.removeEventListener("pointerup", up);
+          m.removeEventListener("pointermove", move); m.removeEventListener("pointerup", up); m.removeEventListener("pointercancel", up);
+          if (pad.start + ":" + pad.end === before) { cancelHistoryGesture(); return; }
           commitHistoryGesture(); window.WAWCollab?.notifyChange?.();
         };
-        m.addEventListener("pointermove", move); m.addEventListener("pointerup", up);
+        m.addEventListener("pointermove", move); m.addEventListener("pointerup", up); m.addEventListener("pointercancel", up);
       });
     });
   }
@@ -543,6 +565,6 @@
 
   window.WAWSampler = {
     PAD_COUNT, BASE_NOTE, defaultPad, normalizeTrack, scheduleNote, previewOn, previewOff,
-    preloadForTracks, sampleIdsInUse, renderDrumKit, open, close, sidebarPanelHtml, attachSidebarPanel, padIndexForNote
+    preloadForTracks, sampleIdsInUse, renderDrumKit, open, close, refreshIfStale, sidebarPanelHtml, attachSidebarPanel, padIndexForNote
   };
 })();

@@ -70,6 +70,7 @@
     activeClipId = null;
     ensureTracks();
     window.WAWMixer.syncEngine();
+    window.WAWAudio?.syncMonitoring?.();
     refreshAll();
     restartPlaybackFromCurrentPosition();
     changed();
@@ -226,7 +227,9 @@
       const local = getClipLocalNotes(clip);
       const cut = at - clip.startSec;
       clip.notesSnapshot = local.filter(n => n.startSec < cut).map(n => ({ ...n, endSec: Math.min(n.endSec, cut) }));
-      right.notesSnapshot = local.filter(n => n.endSec > cut).map(n => ({ ...n, startSec: Math.max(0, n.startSec - cut), endSec: n.endSec - cut }));
+      // notes crossing the cut stay (shortened) in the left clip; copying them into
+      // the right clip as well re-triggered them at the split point
+      right.notesSnapshot = local.filter(n => n.startSec >= cut).map(n => ({ ...n, startSec: n.startSec - cut, endSec: n.endSec - cut }));
     }
     clip.endSec = at;
     t.clips.push(right);
