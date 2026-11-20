@@ -326,6 +326,13 @@ function renderSequencer() {
     window.WAWComp?.appendLanes?.(sequencerGrid, t, ti, { pxPerSec, laneWidthPx });
   });
 
+  // filler below the last track: grid lines continue, the label column stays empty
+  const filler = document.createElement("div");
+  filler.className = "seq-track-row seq-extra-row seq-filler";
+  filler.innerHTML = `<div class="seq-row-label"></div><div class="seq-row-lane"></div>`;
+  filler.querySelector(".seq-row-lane").style.width = laneWidthPx + "px";
+  sequencerGrid.appendChild(filler);
+
   // Restore scroll synchronously after DOM rebuild to avoid a 1-frame visual snap
   sequencerGrid.scrollLeft = prevScrollLeft;
 
@@ -358,55 +365,35 @@ function getSeqLabelWidth() {
 
 function updateSequencerBackgroundGrid() {
   if (!sequencerGrid) return;
+  // The bar / beat lines are drawn on the track LANES (and the filler row below
+  // the last track), where x = 0 is the song start: they never show behind the
+  // track-label column and always stay aligned with the clips while scrolling.
+  // The pattern is shared through CSS custom properties on the grid.
+  seqGridLabelW = getSeqLabelWidth();
+  const pxPerSec = getSeqPxPerSec();
+  const st = sequencerGrid.style;
+  st.backgroundImage = "";
+  st.backgroundColor = "#0a0c14";
   if (window.WAWTempo && !window.WAWTempo.isSimple()) {
-    // non-uniform bars: draw the actual bar/beat lines as an SVG background
-    seqGridLabelW = getSeqLabelWidth();
-    const pxPerSec = getSeqPxPerSec();
-    const widthPx = Math.max(sequencerGrid.scrollWidth, sequencerGrid.clientWidth);
+    // non-uniform bars (tempo / meter changes): exact lines as an SVG
+    const widthPx = Math.max(sequencerGrid.scrollWidth - seqGridLabelW, sequencerGrid.clientWidth);
     const lines = window.WAWTempo.gridLines(0, widthPx / pxPerSec, pxPerSec, 8)
       .filter(l => l.kind !== "sub")
       .map(l => `<rect x="${(l.sec * pxPerSec).toFixed(1)}" y="0" width="${l.kind === "bar" ? 2 : 1}" height="10" fill="${l.kind === "bar" ? "rgba(96,165,250,0.12)" : "rgba(255,255,255,0.06)"}"/>`).join("");
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(widthPx)}" height="10" preserveAspectRatio="none">${lines}</svg>`;
-    sequencerGrid.style.backgroundColor = "#0a0c14";
-    sequencerGrid.style.backgroundImage = `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}")`;
-    sequencerGrid.style.backgroundSize = `${Math.ceil(widthPx)}px 100%`;
-    sequencerGrid.style.backgroundRepeat = "no-repeat";
-    sequencerGrid.style.backgroundPosition = `${seqGridLabelW}px 0`;
+    st.setProperty("--seq-grid-bg", `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}")`);
+    st.setProperty("--seq-grid-size", `${Math.ceil(widthPx)}px 100%`);
+    st.setProperty("--seq-grid-repeat", "no-repeat");
     return;
   }
-  sequencerGrid.style.backgroundSize = "";
-  sequencerGrid.style.backgroundRepeat = "";
-
   const bpm = parseFloat(bpmInput?.value) || 120;
-  const secPerBeat = 60 / bpm;
-  const beatsPerBar = 4;
-
-  const pxPerBeat = seqPxPerBeat;
-  const pxPerBar  = pxPerBeat * beatsPerBar;
-
-  seqGridLabelW = getSeqLabelWidth();
-
-  sequencerGrid.style.backgroundColor = "#0a0c14";
-  sequencerGrid.style.backgroundImage = `
-    repeating-linear-gradient(
-      to right,
-      rgba(255,255,255,0.06) 0,
-      rgba(255,255,255,0.06) 1px,
-      transparent 1px,
-      transparent ${pxPerBeat}px
-    ),
-    repeating-linear-gradient(
-      to right,
-      rgba(96,165,250,0.12) 0,
-      rgba(96,165,250,0.12) 2px,
-      transparent 2px,
-      transparent ${pxPerBar}px
-    )
-  `;
-
-  sequencerGrid.style.backgroundAttachment = "local";
-  sequencerGrid.style.backgroundPosition =
-    `${seqGridLabelW - sequencerGrid.scrollLeft}px 0px`;
+  const pxPerBeat = pxPerSec * (60 / bpm);
+  const pxPerBar = pxPerBeat * 4;
+  st.setProperty("--seq-grid-bg", `
+    repeating-linear-gradient(to right, rgba(255,255,255,0.06) 0, rgba(255,255,255,0.06) 1px, transparent 1px, transparent ${pxPerBeat}px),
+    repeating-linear-gradient(to right, rgba(96,165,250,0.12) 0, rgba(96,165,250,0.12) 2px, transparent 2px, transparent ${pxPerBar}px)`);
+  st.setProperty("--seq-grid-size", "auto");
+  st.setProperty("--seq-grid-repeat", "repeat");
 }
 
 // ---- Clip dragging/resizing ----

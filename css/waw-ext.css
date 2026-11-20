@@ -540,3 +540,18 @@ body[data-skin="ssl"] .sb-bar { background: #20251f; border-color: #3c433b; }
 #mainArea > .main-view.visible { min-height: 0; flex: 1 1 auto; }
 #mixerView.visible { display: flex; flex-direction: column; }
 #mixerView > .mixer-strips { flex: 1 1 auto; min-height: 0; height: auto; }
+
+/* Bar/beat grid on the lanes (never behind the track labels); the filler row
+   below the last track carries it to the bottom of the view */
+#sequencerGrid .seq-track-row:not(.seq-extra-row) .seq-row-lane,
+#sequencerGrid .seq-filler .seq-row-lane {
+  background-image: var(--seq-grid-bg);
+  background-size: var(--seq-grid-size, auto);
+  background-repeat: var(--seq-grid-repeat, repeat);
+  background-position: 0 0;
+}
+#sequencerView > #sequencerGrid { display: flex; flex-direction: column; }
+#sequencerGrid > .seq-track-row { flex: none; }
+#sequencerGrid > .seq-filler { flex: 1 0 24px; min-height: 24px; border-bottom: 0; }
+#sequencerGrid .seq-filler .seq-row-lane { height: auto !important; min-height: 100%; border-radius: 0; }
+#sequencerGrid .seq-filler .seq-row-label { box-shadow: 1px 0 0 #1c2137; }
