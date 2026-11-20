@@ -321,11 +321,7 @@
   }
 
   function formatPosition(sec) {
-    const bpm = parseFloat(bpmInput?.value) || 120;
-    const beats = (sec || 0) * bpm / 60;
-    const bar = Math.floor(beats / 4) + 1;
-    const beat = Math.floor(beats % 4) + 1;
-    const tick = Math.floor((beats % 1) * 960);
+    const { bar, beat, tick } = window.WAWTempo.position(sec || 0);
     const m = Math.floor((sec || 0) / 60);
     const s = ((sec || 0) % 60);
     return { bbt: `${String(bar).padStart(3, " ")}.${beat}.${String(tick).padStart(3, "0")}`, time: `${m}:${s.toFixed(3).padStart(6, "0")}` };

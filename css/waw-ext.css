@@ -366,3 +366,17 @@ body.collab-open header, body.collab-open .app, body.collab-open .global-footer 
   :root { --collab-w: 100vw; }
   body.collab-open header, body.collab-open .app, body.collab-open .global-footer { margin-right: 0; }
 }
+
+/* ---------------- global lane: tempo / meter / arranger ---------------- */
+.seq-global-row { min-height: 54px; height: 54px; }
+.seq-global-row .seq-row-label { background: #11131c; color: #cbd5e1; border-left: 4px solid #64748b; }
+.seq-global-row .seq-label-btns { flex-wrap: wrap; }
+.seq-global-row .seq-label-btns button { font-size: 9px; padding: 1px 4px; width: auto; }
+.seq-global-lane { position: relative; background: rgba(15, 18, 30, 0.85); }
+.arr-section { position: absolute; top: 2px; height: 16px; background: color-mix(in srgb, var(--c) 35%, transparent); border-left: 3px solid var(--c); border-radius: 2px; cursor: pointer; overflow: hidden; box-sizing: border-box; }
+.arr-section span { font: 600 10px/16px system-ui; color: #fff; padding-left: 4px; white-space: nowrap; pointer-events: none; }
+.arr-section:hover { filter: brightness(1.25); }
+.gl-flag { position: absolute; height: 15px; padding: 0 4px; font: 10px/15px ui-monospace, monospace; color: #0b0d14; border-radius: 0 3px 3px 0; cursor: pointer; white-space: nowrap; }
+.gl-flag.tempo { top: 20px; background: #facc15; }
+.gl-flag.sig { top: 37px; background: #93c5fd; }
+.seq-global-label .seq-label-top { font-size: 9.5px; line-height: 1.1; }
