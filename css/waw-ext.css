@@ -221,12 +221,17 @@ body .ws-insert.bypassed .ws-ins-pwr { color: #666; }
 .seq-label-top { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .seq-label-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; }
 .seq-label-kind { font-size: 9px; opacity: 0.65; }
-.seq-label-btns { display: flex; gap: 3px; }
-.seq-label-btns button {
-  font: 700 9px system-ui, sans-serif; width: 18px; height: 16px; padding: 0;
-  border-radius: 3px; border: 1px solid rgba(0,0,0,0.45); cursor: pointer;
-  background: rgba(255,255,255,0.12) !important; color: inherit !important;
+.seq-label-btns { display: flex; gap: 4px; align-items: center; }
+/* the global button style adds margins and left-aligns content: reset it so glyphs sit centred */
+body .seq-label-btns button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0;
+  margin: 0 !important; padding: 0 !important; width: 20px; height: 18px; line-height: 1;
+  font: 700 10px/1 system-ui, sans-serif; letter-spacing: 0; text-align: center;
+  border-radius: 4px; border: 1px solid rgba(0,0,0,0.45); cursor: pointer;
+  background: rgba(255,255,255,0.14) !important; color: inherit !important;
 }
+body .seq-label-btns button .wi { width: 11px; height: 11px; display: block; flex: none; }
+body .seq-label-btns button:hover { filter: brightness(1.15); }
 .seq-label-btns .tb-m.on { background: #f4c430 !important; color: #111 !important; }
 .seq-label-btns .tb-s.on { background: #43a047 !important; color: #fff !important; }
 .seq-label-btns .tb-r.on { background: #e53935 !important; color: #fff !important; }
@@ -370,16 +375,20 @@ body.collab-open header, body.collab-open .app, body.collab-open .global-footer 
 /* ---------------- global lane: tempo / meter / arranger ---------------- */
 .seq-global-row { min-height: 54px; height: 54px; }
 .seq-global-row .seq-row-label { background: #11131c; color: #cbd5e1; border-left: 4px solid #64748b; }
-.seq-global-row .seq-label-btns { flex-wrap: wrap; }
-.seq-global-row .seq-label-btns button { font-size: 9px; padding: 1px 4px; width: auto; }
+.seq-global-row .seq-row-label { justify-content: center; gap: 5px; padding-top: 4px; padding-bottom: 4px; }
+body .seq-global-row .gl-btns button { width: 26px; height: 20px; position: relative; }
+body .seq-global-row .gl-btns button .wi { width: 13px; height: 13px; }
+/* small "+" badge: these buttons add a tempo / meter change or a marker */
+body .seq-global-row .gl-btns button::after { content: "+"; position: absolute; right: 1px; top: -1px; font: 700 9px/1 system-ui; }
 .seq-global-lane { position: relative; background: rgba(15, 18, 30, 0.85); }
-.arr-section { position: absolute; top: 2px; height: 16px; background: color-mix(in srgb, var(--c) 35%, transparent); border-left: 3px solid var(--c); border-radius: 2px; cursor: pointer; overflow: hidden; box-sizing: border-box; }
-.arr-section span { font: 600 10px/16px system-ui; color: #fff; padding-left: 4px; white-space: nowrap; pointer-events: none; }
+.arr-section { position: absolute; top: 2px; height: 17px; background: color-mix(in srgb, var(--c) 35%, transparent); border-left: 3px solid var(--c); border-radius: 2px; cursor: pointer; overflow: hidden; box-sizing: border-box; }
+.arr-section span { display: block; font: 600 10px/1 system-ui; color: #fff; padding: 4px 6px 0 5px; white-space: nowrap; pointer-events: none; }
 .arr-section:hover { filter: brightness(1.25); }
 .gl-flag { position: absolute; height: 15px; padding: 0 4px; font: 10px/15px ui-monospace, monospace; color: #0b0d14; border-radius: 0 3px 3px 0; cursor: pointer; white-space: nowrap; }
-.gl-flag.tempo { top: 20px; background: #facc15; }
-.gl-flag.sig { top: 37px; background: #93c5fd; }
-.seq-global-label .seq-label-top { font-size: 9.5px; line-height: 1.1; }
+.gl-flag { line-height: 15px; }
+.gl-flag.tempo { top: 21px; background: #facc15; }
+.gl-flag.sig { top: 38px; background: #93c5fd; }
+.seq-global-label .seq-label-top { font-size: 9.5px; line-height: 1.2; letter-spacing: 0.02em; text-transform: uppercase; opacity: 0.85; }
 
 /* ---------------- automation lanes ---------------- */
 .auto-row { min-height: 46px; height: 46px; }

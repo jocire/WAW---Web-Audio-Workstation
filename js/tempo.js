@@ -292,11 +292,11 @@
     row.className = "seq-track-row seq-extra-row seq-global-row";
     row.innerHTML = `
       <div class="seq-row-label seq-global-label">
-        <div class="seq-label-top"><span class="seq-label-name">Tempo · Meter · Arranger</span></div>
-        <div class="seq-label-btns">
-          <button type="button" data-g="tempo" title="Add a tempo change at the playhead">+ Tempo</button>
-          <button type="button" data-g="sig" title="Add a time signature change at the playhead">+ Meter</button>
-          <button type="button" data-g="marker" title="Add an arranger marker at the playhead">+ Marker</button>
+        <div class="seq-label-top"><span class="seq-label-name">Tempo · Meter · Markers</span></div>
+        <div class="seq-label-btns gl-btns">
+          <button type="button" data-g="tempo" title="Add a tempo change at the playhead" aria-label="Add tempo change">${window.WAWIcons?.tempo || "♩"}</button>
+          <button type="button" data-g="sig" title="Add a time signature change at the playhead" aria-label="Add meter change">${window.WAWIcons?.meter || "4/4"}</button>
+          <button type="button" data-g="marker" title="Add an arranger marker at the playhead" aria-label="Add marker">${window.WAWIcons?.marker || "⚑"}</button>
         </div>
       </div>
       <div class="seq-row-lane seq-global-lane"></div>`;

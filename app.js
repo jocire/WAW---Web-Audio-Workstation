@@ -189,9 +189,9 @@ function renderSequencer() {
         <div class="seq-label-btns">
           <button type="button" class="tb-m ${t.mute ? "on" : ""}" data-tb="mute" title="Mute">M</button>
           <button type="button" class="tb-s ${t.solo ? "on" : ""}" data-tb="solo" title="Solo">S</button>
-          <button type="button" class="tb-r ${t.armed ? "on" : ""}" data-tb="arm" title="Record arm">R</button>
-          ${t.type === "audio" ? `<button type="button" class="tb-i ${t.monitor ? "on" : ""}" data-tb="monitor" title="Input monitoring">I</button>` : ""}
-          <button type="button" class="tb-a ${t.automation?.show ? "on" : ""} ${(t.automation?.lanes || []).some(l => l.points.length) ? "has" : ""}" data-tb="auto" title="Show automation lanes">A</button>
+          <button type="button" class="tb-r ${t.armed ? "on" : ""}" data-tb="arm" title="Record arm" aria-label="Record arm">${window.WAWIcons?.record || "R"}</button>
+          ${t.type === "audio" ? `<button type="button" class="tb-i ${t.monitor ? "on" : ""}" data-tb="monitor" title="Input monitoring" aria-label="Input monitoring">${window.WAWIcons?.monitor || "I"}</button>` : ""}
+          <button type="button" class="tb-a ${t.automation?.show ? "on" : ""} ${(t.automation?.lanes || []).some(l => l.points.length) ? "has" : ""}" data-tb="auto" title="Show automation lanes" aria-label="Automation lanes">${window.WAWIcons?.automation || "A"}</button>
         </div>
       </div>
       <div class="seq-row-lane"></div>
