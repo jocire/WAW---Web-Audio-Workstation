@@ -172,6 +172,7 @@ function renderSequencer() {
   const laneWidthPx = songLen * pxPerSec;
 
   window.WAWTempo?.buildGlobalRow(sequencerGrid, { pxPerSec, laneWidthPx });
+  window.WAWWorkspace?.syncZoomBar?.();
 
   tracks.forEach((t, ti) => {
     if (!t.color) t.color = getTrackColor(ti);
@@ -876,7 +877,7 @@ sequencerGrid?.addEventListener("wheel", (e) => {
 
     const before = seqPxPerBeat;
     const factor = (e.deltaY > 0) ? 0.9 : 1.1;
-    seqPxPerBeat = Math.min(200, Math.max(20, seqPxPerBeat * factor));
+    seqPxPerBeat = Math.min(200, Math.max(4, seqPxPerBeat * factor)); // 4 = whole songs fit (zoom bar "Fit")
     if (before === seqPxPerBeat) return;
 
     renderSequencer();

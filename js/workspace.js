@@ -428,6 +428,119 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Arrange-view zoom bar: time zoom (−, slider, +, Fit) and track height
+  // (Ctrl+wheel keeps working; the bar mirrors it)
+  // ---------------------------------------------------------------------------
+  const ZOOM_MIN = 4, ZOOM_MAX = 200;           // px per beat (same range as Ctrl+wheel)
+  const ROW_HEIGHTS = [32, 48, 72, 104];
+  const LS_ZOOM = "waw.seqZoom", LS_ROWH = "waw.seqRowHeight";
+  let rowHeight = 48;
+  const zNorm = v => Math.log(v / ZOOM_MIN) / Math.log(ZOOM_MAX / ZOOM_MIN);
+  const zFromNorm = n => ZOOM_MIN * Math.pow(ZOOM_MAX / ZOOM_MIN, n);
+
+  /** zoom the arrange view, keeping the time at the centre of the view in place */
+  function setSeqZoom(pxPerBeat) {
+    const grid = sequencerGrid;
+    if (!grid) return;
+    const next = clamp(pxPerBeat, ZOOM_MIN, ZOOM_MAX);
+    if (Math.abs(next - seqPxPerBeat) < 0.01) return;
+    const labelW = getSeqLabelWidth();
+    const visibleW = Math.max(1, grid.clientWidth - labelW);
+    const centreSec = (grid.scrollLeft + visibleW / 2) / getSeqPxPerSec();
+    seqPxPerBeat = next;
+    try { localStorage.setItem(LS_ZOOM, String(next)); } catch (e) {}
+    renderSequencer();
+    grid.scrollLeft = Math.max(0, centreSec * getSeqPxPerSec() - visibleW / 2);
+    updateSeqViewFromScroll?.();
+    drawSequencerRuler(lastPlayheadSec);
+  }
+
+  /** zoom so the whole song (clips, loop, markers) fits the visible width */
+  function zoomToFit() {
+    const grid = sequencerGrid;
+    if (!grid) return;
+    let end = 0;
+    tracks.forEach(t => (t.clips || []).forEach(c => { end = Math.max(end, c.endSec); }));
+    if (loopEnabled && loopEndSec > loopStartSec) end = Math.max(end, loopEndSec);
+    (window.WAWTempo?.state.markers || []).forEach(m => { end = Math.max(end, m.end ?? m.sec); });
+    if (end <= 0) end = window.WAWTempo ? window.WAWTempo.barToSec(9) : 16; // empty song: 8 bars
+    const visibleW = Math.max(100, grid.clientWidth - getSeqLabelWidth() - 24);
+    const secPerBeat = 60 / (parseFloat(bpmInput?.value) || 120);
+    setSeqZoom((visibleW / (end * 1.03)) * secPerBeat);
+    grid.scrollLeft = 0;
+    updateSeqViewFromScroll?.();
+    drawSequencerRuler(lastPlayheadSec);
+  }
+
+  function setRowHeight(h) {
+    rowHeight = h;
+    sequencerGrid?.style.setProperty("--seq-row-h", h + "px");
+    document.getElementById("sequencerView")?.classList.toggle("rows-compact", h <= 32);
+    try { localStorage.setItem(LS_ROWH, String(h)); } catch (e) {}
+    syncZoomBar();
+    // waveforms / note previews are drawn for the clip size
+    requestAnimationFrame(() => renderSequencer());
+  }
+  function stepRowHeight(dir) {
+    const i = ROW_HEIGHTS.indexOf(rowHeight);
+    const next = ROW_HEIGHTS[clamp((i < 0 ? 1 : i) + dir, 0, ROW_HEIGHTS.length - 1)];
+    if (next !== rowHeight) setRowHeight(next);
+  }
+
+  function buildZoomBar() {
+    const view = document.getElementById("sequencerView");
+    if (!view || document.getElementById("seqZoomBar")) return;
+    const I = window.WAWIcons || {};
+    const bar = document.createElement("div");
+    bar.id = "seqZoomBar";
+    bar.className = "seq-zoombar";
+    bar.innerHTML = `
+      <span class="zb-group" title="Horizontal zoom (also Ctrl + mouse wheel)">
+        <button type="button" data-z="out" aria-label="Zoom out">${I.zoomOut || "−"}</button>
+        <input type="range" min="0" max="1000" step="1" aria-label="Horizontal zoom">
+        <button type="button" data-z="in" aria-label="Zoom in">${I.zoomIn || "+"}</button>
+        <button type="button" data-z="fit" class="zb-text" title="Zoom to fit the whole song">${I.fit || ""}<span>Fit</span></button>
+      </span>
+      <span class="zb-sep"></span>
+      <span class="zb-group" title="Track height">
+        <button type="button" data-z="shorter" aria-label="Smaller tracks">${I.rowsLess || "▁"}</button>
+        <button type="button" data-z="taller" aria-label="Taller tracks">${I.rowsMore || "▇"}</button>
+      </span>`;
+    view.appendChild(bar);
+    const slider = bar.querySelector("input");
+    slider.addEventListener("input", () => setSeqZoom(zFromNorm(slider.value / 1000)));
+    bar.addEventListener("click", (e) => {
+      const z = e.target.closest("[data-z]")?.dataset.z;
+      if (!z) return;
+      if (z === "in") setSeqZoom(seqPxPerBeat * 1.25);
+      else if (z === "out") setSeqZoom(seqPxPerBeat / 1.25);
+      else if (z === "fit") zoomToFit();
+      else if (z === "taller") stepRowHeight(1);
+      else if (z === "shorter") stepRowHeight(-1);
+    });
+    bar.addEventListener("pointerdown", e => e.stopPropagation());
+    // restore the last zoom + track height
+    try {
+      const z = parseFloat(localStorage.getItem(LS_ZOOM));
+      if (z >= ZOOM_MIN && z <= ZOOM_MAX) seqPxPerBeat = z;
+      const h = parseInt(localStorage.getItem(LS_ROWH), 10);
+      if (ROW_HEIGHTS.includes(h)) rowHeight = h;
+    } catch (e) {}
+    setRowHeight(rowHeight);
+  }
+
+  function syncZoomBar() {
+    const bar = document.getElementById("seqZoomBar");
+    if (!bar) return;
+    const slider = bar.querySelector("input");
+    if (document.activeElement !== slider) slider.value = Math.round(zNorm(seqPxPerBeat) * 1000);
+    bar.querySelector('[data-z="in"]').disabled = seqPxPerBeat >= ZOOM_MAX - 0.01;
+    bar.querySelector('[data-z="out"]').disabled = seqPxPerBeat <= ZOOM_MIN + 0.01;
+    bar.querySelector('[data-z="taller"]').disabled = rowHeight >= ROW_HEIGHTS[ROW_HEIGHTS.length - 1];
+    bar.querySelector('[data-z="shorter"]').disabled = rowHeight <= ROW_HEIGHTS[0];
+  }
+
+  // ---------------------------------------------------------------------------
   // Chord voicing (inversion + per-tone octave) for chord-preset drawing
   // ---------------------------------------------------------------------------
   const voicing = { inversion: 0, octaves: [0, 0, 0] };
@@ -505,10 +618,11 @@
     attachDrop();
     attachVoicingControls();
     buildMidiSettings();
+    buildZoomBar();
   });
 
   window.WAWWorkspace = {
     TRACK_KINDS, addTrackOfKind, deleteTrack, duplicateTrack, moveTrack, showTrackMenu, trackButton, toggleArm,
-    importAudioDialog, openTrackFxChain, splitClipAt, toggleClipMute, applyVoicing, acceptMidi, formatPosition, goToStart, popupMenu
+    importAudioDialog, openTrackFxChain, splitClipAt, toggleClipMute, applyVoicing, acceptMidi, formatPosition, goToStart, popupMenu, setSeqZoom, zoomToFit, syncZoomBar, setRowHeight
   };
 })();
