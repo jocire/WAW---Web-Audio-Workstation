@@ -1909,13 +1909,10 @@ function addTrack(_e) {
       // Mount synth controls inside the active track row only
       const instPanel = row.querySelector(".track-instrument-panel");
       if (instPanel && t.type === "audio") {
-        instPanel.innerHTML = `<div class="audio-track-panel">
-          <button type="button" class="edit-synth-btn at-arm ${t.armed ? "on" : ""}">● Arm</button>
-          <button type="button" class="edit-synth-btn at-mon ${t.monitor ? "on" : ""}">Monitor</button>
-          <button type="button" class="edit-synth-btn at-import">Import Audio…</button></div>`;
-        instPanel.querySelector(".at-arm").addEventListener("click", (e) => { e.stopPropagation(); window.WAWWorkspace?.trackButton(t, "arm"); });
-        instPanel.querySelector(".at-mon").addEventListener("click", (e) => { e.stopPropagation(); window.WAWWorkspace?.trackButton(t, "monitor"); });
-        instPanel.querySelector(".at-import").addEventListener("click", (e) => { e.stopPropagation(); window.WAWWorkspace?.importAudioDialog(i); });
+        // per-track input routing (device, channels, gain, meter)
+        instPanel.innerHTML = window.WAWAudio.trackPanelHtml(t);
+        instPanel.dataset.trackId = t.id;
+        window.WAWAudio.attachTrackPanel(instPanel, t, i);
       } else if (instPanel && i === activeTrackIndex && t.instrument === "sampler") {
         instPanel.innerHTML = window.WAWSampler.sidebarPanelHtml(t);
         window.WAWSampler.attachSidebarPanel(instPanel, t);

@@ -240,16 +240,28 @@ body .ws-insert.bypassed .ws-ins-pwr { color: #666; }
 
 /* sidebar */
 .track-type-badge { font-size: 11px; opacity: 0.8; }
-.audio-track-panel { display: flex; flex-wrap: wrap; gap: 4px; }
+.audio-track-panel { display: flex; flex-direction: column; gap: 4px; }
+.audio-track-panel .at-btns { display: flex; gap: 4px; }
+.audio-track-panel .at-btns button { flex: 1; }
+.audio-track-panel label.stack { margin-bottom: 2px; }
+.audio-track-panel select, .audio-track-panel input[type="range"] { width: 100%; }
+.audio-track-panel .at-low-hint { display: none !important; font-size: 10.5px; line-height: 1.3; color: #b45309; margin: 0; }
+.audio-track-panel.no-signal .at-low-hint { display: block !important; }
+.ai-note { font-size: 11px; opacity: 0.8; margin: 0 0 6px; }
+.ai-row { display: flex; gap: 4px; }
+.ai-row select { flex: 1; min-width: 0; }
+#inputEnableBtn.on { background: #29b34a !important; color: #fff !important; }
 .edit-synth-btn.on { background: #e53935 !important; color: #fff !important; }
 .audio-track-panel .at-mon.on { background: #2d9cdb !important; }
 .drum808-pad.selected { outline: 2px solid #f4c430; }
 .octave-controls button.active { background: #f4c430 !important; color: #111 !important; }
 label.stack { display: flex; flex-direction: column; gap: 2px; font-size: 11px; margin-bottom: 6px; }
 label.stack select, label.stack input[type="text"] { width: 100%; }
-.input-meter { height: 6px; background: #050505; border-radius: 3px; overflow: hidden; margin: 6px 0; border: 1px solid #000; }
-#inputMeterBar { height: 100%; width: 0; background: #29b34a; transition: width 0.05s linear; }
-#inputMeterBar.hot { background: #ff3b30; }
+.input-meter { position: relative; height: 14px; background: #050505; border-radius: 3px; overflow: hidden; margin: 4px 0; border: 1px solid #000; }
+.input-meter .im-bar { height: 100%; width: 0; background: linear-gradient(90deg, #1f9d45 0%, #29b34a 70%, #e3c12b 90%, #ff3b30 100%); }
+.input-meter .im-db { position: absolute; right: 4px; top: 0; line-height: 14px; font: 10px/14px ui-monospace, monospace; color: #ddd; }
+.input-meter.hot .im-db { color: #ff6b60; }
+.input-meter.low { border-color: #b45309; }
 
 /* ---------------- sampler ---------------- */
 .smp-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
