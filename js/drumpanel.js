@@ -71,6 +71,7 @@
             <button type="button" class="vs-nav" data-nav="1" aria-label="Next kit">▶</button>
           </div>
           <div class="vs-head-btns">
+            <button type="button" data-act="seq" class="vs-seq-btn" title="Step sequencer">Seq</button>
             <button type="button" data-act="browse">Kits</button>
             <button type="button" data-act="save">Save</button>
             <button type="button" data-act="init" title="Back to the classic kit">Init</button>
@@ -79,6 +80,7 @@
         </header>
         <div class="dm-master"></div>
         <div class="dm-channels"></div>
+        <div class="dm-seq sq-wrap" hidden></div>
         <div class="vs-browser" hidden></div>
       </div>
     </div>`;
@@ -90,6 +92,7 @@
       if (nav) stepKit(Number(nav));
       if (a === "close") close();
       else if (a === "browse") toggleBrowser();
+      else if (a === "seq") toggleSeq();
       else if (a === "save") saveUserKit();
       else if (a === "init") loadKit({ name: "Analog Classic", id: "Classic/0", kit: {}, voices: {} });
     });
@@ -141,6 +144,25 @@
       ch.appendChild(strip);
     });
     updateDisplay();
+    renderSeq();
+  }
+
+  // ---- step sequencer (replaces the channel view while open) ----
+  const LS_SEQ = "waw.drumSeqOpen";
+  function seqOpen() { try { return localStorage.getItem(LS_SEQ) === "1"; } catch (e) { return false; } }
+  function toggleSeq(force) {
+    const on = force ?? !seqOpen();
+    try { localStorage.setItem(LS_SEQ, on ? "1" : "0"); } catch (e) {}
+    if (!on) window.WAWStepSeq?.stop();
+    renderSeq();
+  }
+  function renderSeq() {
+    const box = modal.querySelector(".dm-seq");
+    const on = seqOpen() && !!window.WAWStepSeq;
+    box.hidden = !on;
+    modal.querySelector(".dm-channels").hidden = on;
+    modal.querySelector(".vs-seq-btn")?.classList.toggle("on", on);
+    if (on && track) window.WAWStepSeq.renderDrums(box, track);
   }
 
   // ---------------------------------------------------------------------------
@@ -224,7 +246,7 @@
     render();
     modal.classList.add("visible");
   }
-  function close() { modal?.classList.remove("visible"); toggleBrowser(false); window.WAWCollab?.notifyChange?.(); }
+  function close() { modal?.classList.remove("visible"); toggleBrowser(false); window.WAWStepSeq?.stop(); window.WAWCollab?.notifyChange?.(); }
   function refresh() {
     if (!modal?.classList.contains("visible") || !track) return;
     const fresh = tracks.find(x => x.id === track.id);

@@ -7736,6 +7736,7 @@ function animateRecordingTransport() {
   }
 
   function midiNoteOn(note, velocity, src = null) {
+    if (window.WAWSynthPanel?.currentTrack?.()) window.WAWStepSeq?.noteIn?.(note);
     const targets = liveInputTracks(src);
     const trackIds = targets.map(t => t.id);
     if (!targets.length) return; // nobody listens to this device / channel
