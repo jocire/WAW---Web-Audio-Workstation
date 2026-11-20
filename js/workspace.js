@@ -161,7 +161,13 @@
 
   function toggleArm(t) {
     t.armed = !t.armed;
-    if (t.armed && t.type === "audio") window.WAWAudio.openInput().catch(e => { statusEl.textContent = "Input unavailable: " + e.message; });
+    if (t.type === "audio") window.WAWAudio.syncInputs().catch?.(() => {});
+    else {
+      const n = tracks.filter(x => x.type !== "audio" && x.armed).length;
+      statusEl.textContent = n
+        ? `${n} MIDI track(s) armed: your keyboard plays all of them, and Record records into each.`
+        : "No MIDI track armed: the keyboard plays the selected track.";
+    }
     refreshAll();
   }
 

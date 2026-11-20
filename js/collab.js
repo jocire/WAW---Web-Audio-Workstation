@@ -124,12 +124,15 @@
         <div class="cp-live"><span class="cp-dot"></span>Live in room <code>${escapeHtml(state.roomId)}</code></div>
         <div class="cp-join-row"><input type="text" readonly class="cp-link" value="${escapeHtml(link)}"><button type="button" class="cp-copy">Copy link</button></div>
         <label class="cp-check"><input type="checkbox" class="cp-follow" ${state.followTransport ? "checked" : ""}> Follow others' play/stop</label>
+        <label class="cp-check" title="When someone presses Record, start recording your own armed tracks at the same song position (and stop with them). Arm the tracks you play on."><input type="checkbox" class="cp-rectog" ${state.recordTogether ? "checked" : ""}> Record together (band mode)</label>
+        <p class="cp-note">Arming, monitoring and audio inputs are yours only: everyone arms and records their own tracks. Each take lines up with the song as you heard it.</p>
         <button type="button" class="cp-leave">Leave session</button>`;
       box.querySelector(".cp-copy").addEventListener("click", async () => {
         try { await navigator.clipboard.writeText(link); toast("Session link copied"); }
         catch (e) { box.querySelector(".cp-link").select(); }
       });
       box.querySelector(".cp-follow").addEventListener("change", (e) => { state.followTransport = e.target.checked; });
+      box.querySelector(".cp-rectog").addEventListener("change", (e) => { state.recordTogether = e.target.checked; });
       box.querySelector(".cp-leave").addEventListener("click", leave);
     }
   }
@@ -220,6 +223,7 @@
     }
     state.roomId = roomId;
     state.selfId = lib.selfId;
+    units.clear(); clock = 0;
     state.room = lib.joinRoom({ appId: APP_ID, password: roomId }, roomId);
     state.peers.clear();
     // creator owns version 1; a joiner starts at 0 so the room's state wins
@@ -248,7 +252,7 @@
       renderPeople();
       sendPresence(peerId);
       // send our project to the newcomer; they adopt the highest version
-      if (state.version > 0) sendProject(peerId);
+      if (state.adoptedRoom) sendProject(peerId);
       if (state.localStream) state.room.addStream(state.localStream, { target: peerId });
     };
     state.room.onPeerLeave = (peerId) => {
@@ -288,6 +292,25 @@
       } catch (e) { console.warn("sample receive failed", e); }
     };
     state.actions.transport.onMessage = (data) => {
+      // "Record together": start / stop our own recording with the others
+      if (state.recordTogether && typeof data?.recording === "boolean") {
+        if (data.recording && !isRecording && tracks.some(t => t.armed)) {
+          state.remoteRecording = true;
+          state.remoteTransport = true;
+          stopPlayback();
+          lastPlayheadSec = clamp(Number(data.pos) || 0, 0, 36000);
+          playheadWasManuallySet = true;
+          startRecording();
+          statusEl.textContent = `Recording together with ${state.peers.get(data.from)?.name || "the session"}…`;
+          return;
+        }
+        if (!data.recording && isRecording && state.remoteRecording) {
+          state.remoteRecording = false;
+          state.remoteTransport = false;
+          stopRecording();
+          return;
+        }
+      }
       if (!state.followTransport || isRecording) return;
       // remember the remote state so our transport watcher does not echo it back
       // (the echo restarted playback on the sender)
@@ -345,10 +368,78 @@
   // ---------------------------------------------------------------------------
   // Project sync
   // ---------------------------------------------------------------------------
-  function projectPayload() {
-    const p = getProjectPayload();
-    delete p.savedAt; delete p.id; delete p.name;
-    return p;
+  // ---------------------------------------------------------------------------
+  // Project sync (protocol 2): the project is split into UNITS, each a
+  // last-writer-wins register with its own Lamport version, so concurrent
+  // edits on different parts merge instead of overwriting each other:
+  //   t:<id>:meta     name, colour, type, instrument, mute/solo, alive
+  //   t:<id>:mix      volume, pan, mono, strip, inserts, sends, automation
+  //   t:<id>:inst     synth / drum synth / sampler patch
+  //   t:<id>:content  clips + notes
+  //   g:order g:mixer g:tempo g:loop g:key
+  // Per-user settings never leave the computer: armed, monitor, input.
+  // Remote units are applied IN PLACE (track objects keep their identity), and
+  // the content of a track that is being recorded locally is kept until the
+  // take is finished, so recording and someone else's mixing do not collide.
+  // ---------------------------------------------------------------------------
+  const LOCAL_FIELDS = new Set(["armed", "monitor", "input"]);
+  const UNIT_FIELDS = {
+    mix: ["volume", "pan", "mono", "strip", "inserts", "sends", "sendPre", "automation"],
+    inst: ["synthPatch", "drum808Patch", "samplerPatch"],
+    content: ["clips", "notes"],
+  };
+  const NON_META = new Set([...LOCAL_FIELDS, ...Object.values(UNIT_FIELDS).flat()]);
+  const units = new Map(); // key -> { v, by, h }
+  let clock = 0;
+
+  function hashStr(s) { let h = 2166136261 >>> 0; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h.toString(36) + ":" + s.length; }
+  const plain = (v) => JSON.parse(JSON.stringify(v ?? null));
+
+  /** current local state split into units: Map(key -> value) */
+  function localUnits() {
+    if (currentView === "editor" && typeof saveEditorNotesToActiveClip === "function") { try { saveEditorNotesToActiveClip(); } catch (e) {} }
+    const out = new Map();
+    tracks.forEach(t => {
+      const meta = { alive: true };
+      Object.keys(t).forEach(k => { if (!NON_META.has(k) && typeof t[k] !== "function") meta[k] = t[k]; });
+      out.set(`t:${t.id}:meta`, plain(meta));
+      Object.entries(UNIT_FIELDS).forEach(([u, fields]) => {
+        const v = {}; fields.forEach(f => { if (t[f] !== undefined) v[f] = t[f]; });
+        out.set(`t:${t.id}:${u}`, plain(v));
+      });
+    });
+    // deleted tracks keep a tombstone so the deletion wins over older edits
+    units.forEach((rec, key) => {
+      const m = /^t:(.+):meta$/.exec(key);
+      if (m && !tracks.some(t => t.id === m[1])) out.set(key, rec.dead ? rec.value : { alive: false, id: m[1] });
+    });
+    out.set("g:order", tracks.map(t => t.id));
+    out.set("g:mixer", window.WAWMixer?.serialize() ?? null);
+    out.set("g:tempo", { map: window.WAWTempo?.serialize() ?? null, timelineBpm });
+    out.set("g:loop", { loopStartSec, loopEndSec, loopEnabled });
+    out.set("g:key", { tonicName, scaleId: scaleSelect ? scaleSelect.value : "major" });
+    return out;
+  }
+
+  /** bump the version of every unit whose content changed locally */
+  function stampLocal() {
+    const cur = localUnits();
+    let changed = false;
+    cur.forEach((value, key) => {
+      const h = hashStr(JSON.stringify(value));
+      const rec = units.get(key);
+      if (rec && rec.h === h) return;
+      clock += 1;
+      units.set(key, { v: clock, by: state.selfId, h, value, dead: value?.alive === false });
+      changed = true;
+    });
+    return { cur, changed };
+  }
+
+  function packet() {
+    const out = {};
+    units.forEach((rec, key) => { out[key] = { v: rec.v, by: rec.by, value: rec.value }; });
+    return { proto: 2, clock, units: out, lead: state.selfId };
   }
 
   let changeTimer = null;
@@ -358,44 +449,41 @@
     if (!state.room || state.applyingRemote || !state.adoptedRoom) return;
     clearTimeout(changeTimer);
     changeTimer = setTimeout(() => {
-      const payload = projectPayload();
-      const sig = JSON.stringify(payload);
-      if (sig === state.lastSentSig) return;
-      state.lastSentSig = sig;
-      state.version += 1;
-      state.versionBy = state.selfId;
-      state.actions.project.send({ v: state.version, by: state.selfId, payload });
+      const { changed } = stampLocal();
+      if (!changed) return;
+      state.actions.project.send(packet());
     }, 350);
   }
 
   function sendProject(target) {
-    const payload = projectPayload();
-    state.lastSentSig = JSON.stringify(payload);
-    state.actions.project.send({ v: state.version, by: state.versionBy || state.selfId, payload }, target ? { target } : undefined);
+    stampLocal();
+    state.actions.project.send(packet(), target ? { target } : undefined);
   }
 
-  function newer(v, by) {
-    if (v > state.version) return true;
-    if (v === state.version && String(by) > String(state.versionBy)) return true;
-    return false;
-  }
+  const wins = (r, l) => !l || r.v > l.v || (r.v === l.v && String(r.by) > String(l.by));
 
   async function receiveProject(data, peerId) {
-    if (!data || typeof data !== "object" || !data.payload?.project) return;
-    const v = Number(data.v) || 0;
-    if (!newer(v, data.by)) return;
+    if (!data || typeof data !== "object" || data.proto !== 2 || !data.units || typeof data.units !== "object") return;
+    clock = Math.max(clock, Number(data.clock) || 0);
     if (!state.adoptedRoom) {
-      // first state from the room: keep a backup of whatever was open locally
+      // first state from the room: keep a backup of whatever was open locally,
+      // then take the room's project as a whole
       state.adoptedRoom = true;
+      clearTimeout(state.adoptTimer);
       const hasContent = tracks.some(t => (t.clips || []).length || (t.notes || []).length);
       if (hasContent) {
         try { saveProjectToLibrary(`Backup before ${state.roomId}`, { newProject: true, silent: true }); } catch (e) {}
         setActiveProject(null);
       }
+      units.clear();
+      tracks.splice(0, tracks.length);
     }
-    state.version = v;
-    state.versionBy = String(data.by || peerId);
-    applyRemote(data.payload);
+    const incoming = [];
+    Object.entries(data.units).forEach(([key, rec]) => {
+      if (!rec || typeof rec !== "object" || !Number.isFinite(rec.v)) return;
+      if (wins(rec, units.get(key))) incoming.push([key, rec]);
+    });
+    if (incoming.length) mergeUnits(incoming);
     // fetch any audio we don't have yet
     const missing = [...window.WAWSampler.sampleIdsInUse(tracks)].filter(id => !window.WAWSamples.has(id));
     if (missing.length) {
@@ -406,34 +494,101 @@
     }
   }
 
-  function applyRemote(payload) {
+  const toNotes = (arr) => (Array.isArray(arr) ? arr : []).map(o => new NoteEvent(o.startSec, o.endSec, o.midiNote, o.velocity, o.scaleDegree, o.octave));
+
+  /** is this track being recorded into right now (its clips must not be replaced)? */
+  function recordingLocally(t) {
+    if (!isRecording) return false;
+    if (t.armed) return true;
+    return tracks.indexOf(t) === clipRecordTrackIndex;
+  }
+
+  function mergeUnits(incoming) {
     state.applyingRemote = true;
     try {
+      if (currentView === "editor") { try { saveEditorNotesToActiveClip(); } catch (e) {} }
       const keepTrackId = tracks[activeTrackIndex]?.id;
-      const keepClip = activeClipId;
-      const keepView = currentView;
-      if (currentView === "editor") saveEditorNotesToActiveClip();
-      historyLocked = true;
-      restoreSnapshot(payload.project);
-      historyLocked = false;
-      const idx = tracks.findIndex(t => t.id === keepTrackId);
-      activeTrackIndex = idx >= 0 ? idx : Math.min(activeTrackIndex, tracks.length - 1);
-      ensureTracks();
-      if (keepClip && tracks[activeTrackIndex]?.clips?.some(c => c.id === keepClip)) {
-        activeClipId = keepClip;
-        const clip = getActiveClip();
-        if (clip && keepView === "editor") syncTrackNotesFromClip(tracks[activeTrackIndex], clip);
+      let order = null, structural = false;
+      const byId = new Map(tracks.map(t => [t.id, t]));
+      const getTrack = (id) => {
+        let t = byId.get(id);
+        if (!t) { t = normalizeTrack({ id, name: "Track", clips: [], notes: [] }, tracks.length); tracks.push(t); byId.set(id, t); structural = true; }
+        return t;
+      };
+      const removed = new Set();
+      const applied = new Set();
+      incoming.forEach(([key, rec]) => {
+        const value = rec.value;
+        const m = /^t:(.+):(meta|mix|inst|content)$/.exec(key);
+        if (m) {
+          const [, id, unit] = m;
+          if (unit === "meta" && value?.alive === false) {
+            removed.add(id);
+            units.set(key, { v: rec.v, by: rec.by, h: hashStr(JSON.stringify(value)), value, dead: true });
+            return;
+          }
+          if (removed.has(id)) return;
+          const t = getTrack(id);
+          if (unit === "content" && recordingLocally(t)) return; // keep the take; ours will win when it is done
+          if (unit === "meta") {
+            Object.keys(t).forEach(k => { if (!NON_META.has(k) && k !== "id" && !(k in value)) delete t[k]; });
+            Object.entries(value || {}).forEach(([k, v]) => { if (k !== "alive" && k !== "id" && !LOCAL_FIELDS.has(k)) t[k] = v; });
+            structural = true;
+          } else {
+            UNIT_FIELDS[unit].forEach(f => { if (value && f in value) t[f] = structuredClone(value[f]); else if (unit !== "content") delete t[f]; });
+            if (unit === "content") {
+              t.notes = toNotes(t.notes);
+              t.clips = (t.clips || []).map(c => ({ ...c, notesSnapshot: toNotes(c.notesSnapshot) }));
+            }
+            if (unit === "mix") window.WAWMixer?.normalizeTrackMix(t);
+            if (unit === "inst" && t.instrument === "sampler") window.WAWSampler?.normalizeTrack(t);
+          }
+        } else if (key === "g:order") { order = Array.isArray(value) ? value.map(String) : null; }
+        else if (key === "g:mixer" && value && window.WAWMixer) window.WAWMixer.state = value;
+        else if (key === "g:tempo" && value) {
+          if (value.map && window.WAWTempo) window.WAWTempo.setState(value.map, value.timelineBpm);
+          if (Number.isFinite(value.timelineBpm)) { timelineBpm = value.timelineBpm; if (bpmInput) bpmInput.value = value.timelineBpm; }
+        } else if (key === "g:loop" && value) {
+          loopStartSec = Number(value.loopStartSec) || 0; loopEndSec = Number(value.loopEndSec) || 0;
+          loopEnabled = !!value.loopEnabled; loopBtn?.classList.toggle("active", loopEnabled);
+        } else if (key === "g:key" && value) {
+          tonicName = value.tonicName || tonicName;
+          if (scaleSelect && value.scaleId) scaleSelect.value = value.scaleId;
+        }
+        units.set(key, { v: rec.v, by: rec.by, h: hashStr(JSON.stringify(value)), value });
+        applied.add(key);
+      });
+      // remove deleted tracks; order = the winning order, then any other live tracks
+      if (removed.size) { for (let i = tracks.length - 1; i >= 0; i--) if (removed.has(tracks[i].id)) tracks.splice(i, 1); structural = true; }
+      if (order) {
+        const pos = new Map(order.map((id, i) => [id, i]));
+        tracks.sort((a, b) => (pos.has(a.id) ? pos.get(a.id) : 1e9) - (pos.has(b.id) ? pos.get(b.id) : 1e9));
+        structural = true;
       }
-      if (payload.bpm && bpmInput) { bpmInput.value = payload.bpm; timelineBpm = payload.bpm; }
-      if (typeof payload.loopEnabled === "boolean") { loopEnabled = payload.loopEnabled; loopBtn?.classList.toggle("active", loopEnabled); }
-      state.lastSentSig = JSON.stringify(projectPayload());
+      const idx = tracks.findIndex(t => t.id === keepTrackId);
+      activeTrackIndex = idx >= 0 ? idx : Math.max(0, Math.min(activeTrackIndex, tracks.length - 1));
+      ensureTracks();
+      notes = tracks[activeTrackIndex]?.notes || notes;
+      if (activeClipId && !tracks[activeTrackIndex]?.clips?.some(c => c.id === activeClipId)) activeClipId = null;
+      void structural;
+      window.WAWMixer?.syncEngine?.();
+      window.WAWAudio?.syncInputs?.();
       renderSidebarTracks(); renderSequencer(); window.renderMixer();
       window.WAWSampler?.refreshIfStale?.(); window.WAWAudio?.refreshEditor?.();
       if (currentView === "editor") { drawPianoRoll(lastPlayheadSec); drawVelocityLane(); }
+      drawAllLoopBars?.(lastPlayheadSec);
+      // record how the merged units look locally (normalisation may add
+      // defaults) WITHOUT bumping versions, and only for the merged units:
+      // our own pending changes (e.g. a take that just finished) must still be
+      // detected and sent by notifyChange
+      const cur = localUnits();
+      applied.forEach((key) => {
+        const r = units.get(key);
+        if (r && cur.has(key)) { r.value = cur.get(key); r.h = hashStr(JSON.stringify(r.value)); }
+      });
     } catch (e) {
-      console.error("remote project apply failed", e);
+      console.error("remote project merge failed", e);
     } finally {
-      historyLocked = false;
       state.applyingRemote = false;
     }
   }
@@ -443,14 +598,26 @@
   function hookTransport() {
     if (hooked) return;
     hooked = true;
-    let wasPlaying = false;
+    let wasPlaying = false, wasRecording = false;
     setInterval(() => {
       if (!state.room) return;
+      if (isRecording !== wasRecording) {
+        wasRecording = isRecording;
+        // a recording we started because someone else did is not broadcast again
+        if (!state.remoteRecording || !isRecording) {
+          if (!(state.remoteRecordingEnded && !isRecording)) {
+            state.actions.transport.send({ playing: isPlaying, recording: isRecording, pos: (isRecording ? recordingBaseSec : lastPlayheadSec) || 0, from: state.selfId });
+          }
+        }
+        state.remoteRecordingEnded = false;
+        wasPlaying = isPlaying;
+        return;
+      }
       if (isPlaying !== wasPlaying) {
         wasPlaying = isPlaying;
         const echo = state.remoteTransport === isPlaying;
         state.remoteTransport = null;
-        if (!echo) state.actions.transport.send({ playing: isPlaying, pos: lastPlayheadSec || 0 });
+        if (!echo && !isRecording) state.actions.transport.send({ playing: isPlaying, pos: lastPlayheadSec || 0, from: state.selfId });
       }
     }, 150);
     let lastPresence = "";

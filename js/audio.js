@@ -416,6 +416,9 @@
   function recordTargets() {
     const armed = tracks.filter(t => t.type === "audio" && t.armed);
     if (armed.length) return armed;
+    // the selected audio track only records when nothing at all is armed
+    // (arming MIDI tracks must not also open a microphone)
+    if (tracks.some(t => t.armed)) return [];
     const active = getActiveTrack();
     return active?.type === "audio" ? [active] : [];
   }
