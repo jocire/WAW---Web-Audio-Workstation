@@ -887,9 +887,15 @@ sequencerGrid?.addEventListener("wheel", (e) => {
     const afterX = beforeSec * afterPxPerSec;
     sequencerGrid.scrollLeft = afterX - (mouseX - rect.left - labelW);
 
+  } else if (e.shiftKey) {
+    // Shift+wheel = scroll through the tracks (there is no horizontal scrollbar
+    // any more, the vertical one may be off-screen with few tracks)
+    e.preventDefault();
+    sequencerGrid.scrollTop += e.deltaY || e.deltaX;
   } else {
-    // normal wheel = horizontal pan
-    sequencerGrid.scrollLeft += e.deltaY;
+    // normal wheel = horizontal pan (trackpads: use the larger axis)
+    e.preventDefault();
+    sequencerGrid.scrollLeft += Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
   }
 }, { passive:false });
 
