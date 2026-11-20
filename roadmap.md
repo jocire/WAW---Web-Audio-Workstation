@@ -85,6 +85,9 @@ WAV export, so what you hear is what you export.
   Home/End, Space, Alt+N, Alt+1..9.
 - Transport: bars.beats.ticks + time display, return to start, tap tempo, header master meter.
 - MIDI input device + channel filter; chord voicing (inversion, per-tone octave) works.
+- Per-track MIDI In (device: all / computer keyboard / a specific controller; channel:
+  any / 1–16): armed tracks only receive matching notes, so several players (or a split
+  keyboard) can record different tracks in the same take. Kept per computer (not synced).
 - Projects embed their audio when exported as JSON.
 
 ### Audio input (per track)

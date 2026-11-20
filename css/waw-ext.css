@@ -541,6 +541,12 @@ body[data-skin="ssl"] .sb-bar { background: #20251f; border-color: #3c433b; }
 #mixerView.visible { display: flex; flex-direction: column; }
 #mixerView > .mixer-strips { flex: 1 1 auto; min-height: 0; height: auto; }
 
+/* per-track MIDI input */
+.track-midiin-row { display: flex; align-items: center; gap: 4px; }
+.track-midiin-row label { flex: none; }
+.track-midiin-row .track-midi-dev { flex: 1 1 auto; min-width: 0; }
+.track-midiin-row .track-midi-ch { flex: none; width: 72px; }
+
 /* Bar/beat grid on the lanes (never behind the track labels); the filler row
    below the last track carries it to the bottom of the view */
 #sequencerGrid .seq-track-row:not(.seq-extra-row) .seq-row-lane,

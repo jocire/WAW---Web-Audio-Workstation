@@ -377,12 +377,12 @@
   //   t:<id>:inst     synth / drum synth / sampler patch
   //   t:<id>:content  clips + notes
   //   g:order g:mixer g:tempo g:loop g:key
-  // Per-user settings never leave the computer: armed, monitor, input.
+  // Per-user settings never leave the computer: armed, monitor, input, midiIn.
   // Remote units are applied IN PLACE (track objects keep their identity), and
   // the content of a track that is being recorded locally is kept until the
   // take is finished, so recording and someone else's mixing do not collide.
   // ---------------------------------------------------------------------------
-  const LOCAL_FIELDS = new Set(["armed", "monitor", "input"]);
+  const LOCAL_FIELDS = new Set(["armed", "monitor", "input", "midiIn"]);
   const UNIT_FIELDS = {
     mix: ["volume", "pan", "mono", "strip", "inserts", "sends", "sendPre", "automation"],
     inst: ["synthPatch", "drum808Patch", "samplerPatch"],
