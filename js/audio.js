@@ -280,48 +280,108 @@
   // ---------------------------------------------------------------------------
   const captures = new Map(); // owner id -> capture (keeps its input alive)
 
+  /**
+   * Record from an input chain. Two recorders run side by side: the AudioWorklet
+   * recorder (sample-accurate) and a ScriptProcessor backup, because on some
+   * systems the worklet delivers no audio from a real device. stop() returns the
+   * buffer from whichever recorder actually received signal.
+   */
   async function captureFrom(ti) {
     const ctx = ti.gain.context;
+    const diag = {
+      device: ti.dev.label, deviceSettings: (() => { try { const s = ti.dev.stream.getAudioTracks()[0].getSettings(); return { sampleRate: s.sampleRate, channelCount: s.channelCount, autoGainControl: s.autoGainControl, echoCancellation: s.echoCancellation }; } catch (e) { return null; } })(),
+      trackState: ti.dev.stream.getAudioTracks()[0]?.readyState, trackMuted: ti.dev.stream.getAudioTracks()[0]?.muted,
+      ctxRate: ctx.sampleRate, ctxState: ctx.state, baseLatency: ctx.baseLatency, outputLatency: ctx.outputLatency,
+      worklet: false, workletFrames: 0, workletPeak: 0, backupFrames: 0, backupPeak: 0, used: null
+    };
+    const sink = ctx.createGain(); sink.gain.value = 0;
+    sink.connect(ctx.destination);
+
+    // --- AudioWorklet recorder ---
     await window.WAWFX.ensureWorklets(ctx);
     const node = window.WAWFX.makeWorklet(ctx, "waw-recorder", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: "explicit" });
-    if (!node) throw new Error("AudioWorklet recording is not supported in this browser");
-    const chunks = [[], []];
-    let startedAt = null, resolveStop = null, peak = 0;
-    node.port.onmessage = (e) => {
-      const m = e.data;
-      if (m.type === "started") startedAt = m.time;
-      else if (m.type === "data") m.channels.forEach((c, i) => {
-        if (i >= 2) return;
-        chunks[i].push(c);
-        for (let k = 0; k < c.length; k += 16) { const v = Math.abs(c[k]); if (v > peak) peak = v; }
-      });
-      else if (m.type === "stopped") resolveStop?.();
-    };
-    ti.gain.connect(node);
-    // keep the worklet pulled by the graph without making it audible
-    const sink = ctx.createGain(); sink.gain.value = 0;
-    node.connect(sink); sink.connect(ctx.destination);
-    node.port.postMessage({ cmd: "start" });
-    const cleanup = () => { try { ti.gain.disconnect(node); } catch (e) {} try { node.disconnect(); sink.disconnect(); } catch (e) {} };
-    return {
-      get startedAt() { return startedAt; },
-      get peak() { return peak; },
-      async stop() {
-        await new Promise(res => { resolveStop = res; node.port.postMessage({ cmd: "stop" }); setTimeout(res, 500); });
-        cleanup();
-        const len = chunks[0].reduce((a, c) => a + c.length, 0);
-        if (!len) return null;
-        const buf = new AudioBuffer({ numberOfChannels: 2, length: len, sampleRate: ctx.sampleRate });
+    const wChunks = [[], []];
+    let wStartedAt = null, resolveStop = null;
+    if (node) {
+      diag.worklet = true;
+      node.port.onmessage = (e) => {
+        const m = e.data;
+        if (m.type === "started") wStartedAt = m.time;
+        else if (m.type === "data") m.channels.forEach((c, i) => {
+          if (i >= 2) return;
+          wChunks[i].push(c);
+          if (i === 0) diag.workletFrames += c.length;
+          for (let k = 0; k < c.length; k += 16) { const v = Math.abs(c[k]); if (v > diag.workletPeak) diag.workletPeak = v; }
+        });
+        else if (m.type === "stopped") resolveStop?.();
+      };
+      ti.gain.connect(node);
+      node.connect(sink);
+      node.port.postMessage({ cmd: "start" });
+    }
+
+    // --- ScriptProcessor backup recorder ---
+    const BS = 4096;
+    const sp = ctx.createScriptProcessor ? ctx.createScriptProcessor(BS, 2, 2) : null;
+    const bChunks = [[], []];
+    let bStartedAt = null, bRecording = true;
+    if (sp) {
+      sp.onaudioprocess = (e) => {
+        if (!bRecording) return;
+        const ib = e.inputBuffer;
+        // playbackTime is when this block's OUTPUT plays; measured against the
+        // worklet recorder, the input was captured about 3 blocks earlier
+        if (bStartedAt == null) bStartedAt = e.playbackTime - 3 * BS / ctx.sampleRate;
         for (let ch = 0; ch < 2; ch++) {
-          const d = new Float32Array(len); let o = 0;
-          (chunks[ch].length ? chunks[ch] : chunks[0]).forEach(c => { d.set(c, o); o += c.length; });
-          buf.copyToChannel(d, ch);
+          const d = new Float32Array(ib.getChannelData(Math.min(ch, ib.numberOfChannels - 1)));
+          bChunks[ch].push(d);
+          if (ch === 0) {
+            diag.backupFrames += d.length;
+            for (let k = 0; k < d.length; k += 16) { const v = Math.abs(d[k]); if (v > diag.backupPeak) diag.backupPeak = v; }
+          }
         }
-        return buf;
+      };
+      ti.gain.connect(sp);
+      sp.connect(sink);
+    }
+    if (!node && !sp) throw new Error("this browser cannot record audio (no AudioWorklet / ScriptProcessor)");
+
+    const cleanup = () => {
+      bRecording = false;
+      try { if (node) ti.gain.disconnect(node); } catch (e) {}
+      try { if (sp) ti.gain.disconnect(sp); } catch (e) {}
+      try { node?.disconnect(); sp?.disconnect(); sink.disconnect(); } catch (e) {}
+      if (sp) sp.onaudioprocess = null;
+    };
+    const toBuffer = (chunks) => {
+      const len = chunks[0].reduce((a, c) => a + c.length, 0);
+      if (!len) return null;
+      const buf = new AudioBuffer({ numberOfChannels: 2, length: len, sampleRate: ctx.sampleRate });
+      for (let ch = 0; ch < 2; ch++) {
+        const d = new Float32Array(len); let o = 0;
+        (chunks[ch].length ? chunks[ch] : chunks[0]).forEach(c => { d.set(c, o); o += c.length; });
+        buf.copyToChannel(d, ch);
+      }
+      return buf;
+    };
+    // the worklet wins unless it got (nearly) nothing while the backup heard signal
+    const useBackup = () => !diag.workletFrames || (diag.workletPeak < 1e-4 && diag.backupPeak > 1e-3);
+    return {
+      diag,
+      get startedAt() { return useBackup() ? bStartedAt : wStartedAt; },
+      get peak() { return useBackup() ? diag.backupPeak : diag.workletPeak; },
+      async stop() {
+        if (node) await new Promise(res => { resolveStop = res; node.port.postMessage({ cmd: "stop" }); setTimeout(res, 500); });
+        cleanup();
+        const backup = useBackup();
+        diag.used = backup ? "backup" : "worklet";
+        lastDiagnostics = { ...diag, at: new Date().toISOString() };
+        return toBuffer(backup ? bChunks : wChunks);
       },
-      cancel() { node.port.postMessage({ cmd: "stop" }); cleanup(); }
+      cancel() { if (node) node.port.postMessage({ cmd: "stop" }); cleanup(); }
     };
   }
+  let lastDiagnostics = null;
 
   /** capture from the default input (used by the sampler's pad recording) */
   async function startCapture(ownerId = "__sampler") {
@@ -379,7 +439,10 @@
     // latency compensation: input + output latency reported by the browser + user offset
     const autoLatency = (ctx.baseLatency || 0) + (ctx.outputLatency || 0);
     const latency = autoLatency + settings().latency / 1000;
-    const songStart0 = t.recordingBaseSec + (startedAt - t.recordingStartTime) - latency;
+    const base = Number.isFinite(t.recordingBaseSec) ? t.recordingBaseSec : 0;
+    const startDelay = Number.isFinite(startedAt) && Number.isFinite(t.recordingStartTime) ? startedAt - t.recordingStartTime : 0;
+    t = { ...t, recordingBaseSec: base };
+    const songStart0 = base + startDelay - (Number.isFinite(latency) ? latency : 0);
     const L = t.recordingLoopLen;
     if (L > 0) {
       // pass k starts at buffer time first + k*L (first = loop start of pass 0)
@@ -411,7 +474,7 @@
       const startedAt = capture.startedAt ?? t.recordingStartTime;
       const buf = await capture.stop();
       captures.delete(track.id);
-      results.push({ track, buf, startedAt, peak: capture.peak });
+      results.push({ track, buf, startedAt, peak: capture.peak, diag: capture.diag });
     }
     syncInputs();
     let made = 0, quiet = [];
@@ -433,9 +496,15 @@
     // the undo snapshot was taken when recording started, so one undo removes the whole take
     renderSequencer();
     window.WAWCollab?.notifyChange?.();
-    if (!made) statusEl.textContent = "No audio captured.";
-    else if (quiet.length) statusEl.textContent = `Recorded, but the input on ${quiet.join(", ")} was almost silent: raise its Input gain or turn on Auto gain, and check the mic in the OS sound settings.`;
-    else statusEl.textContent = `Recorded audio on ${made} track(s).`;
+    const report = results.map(r => {
+      const d = r.diag || {};
+      const db = r.peak > 0 ? (20 * Math.log10(r.peak)).toFixed(0) + " dB" : "silence";
+      return `${r.track.name}: ${r.buf ? r.buf.duration.toFixed(1) + " s" : "no audio"} from "${d.device || "input"}", peak ${db}`;
+    }).join(" · ");
+    console.info("[WAW] recording diagnostics", results.map(r => r.diag));
+    if (!made) statusEl.textContent = `No audio captured (${report}). Use "Copy recording diagnostics" in the Recording panel and send it to support.`;
+    else if (quiet.length) statusEl.textContent = `Recorded, but almost silent (${report}). Raise Input gain or turn on Auto gain, and check the mic level in your OS sound settings.`;
+    else statusEl.textContent = `Recorded: ${report}.`;
   }
 
   function addAudioClip(track, sampleId, startSec, lengthSec, offset = 0, name = null) {
@@ -492,6 +561,7 @@
    * (for offline rendering, `when` equals the song position).
    */
   function scheduleAudioEvent(ctx, destination, ev, when, lateBy = 0) {
+    if (![ev.start, ev.end, ev.offset, ev.clipStart, ev.clipEnd, when].every(Number.isFinite)) return [];
     const k = ev.k || 1;
     // warped: pitch-preserving stretched render when ready, varispeed until then
     let buf = null, stretched = false;
@@ -772,33 +842,27 @@
     const host = document.getElementById("audioInputSettings");
     if (!host) return;
     const s = settings();
+    // inputs are chosen per audio track (track panel); only global recording settings live here
     host.innerHTML = `
-      <div class="subsection-title">Audio Input</div>
-      <p class="ai-note">Each audio track picks its own input, channels and gain in its track panel. Arm or monitor a track to open its input.</p>
+      <div class="subsection-title">Recording</div>
+      <p class="ai-note">Inputs are set per audio track: select an audio track to choose its device, channels and gain. Arm a track and press Record.</p>
       <label class="stack">Latency offset <span id="latencyVal">${s.latency} ms</span><input type="range" id="latencySlider" min="-200" max="200" step="1" value="${s.latency}"></label>
-      <div class="ai-test">${meterHtml("__test")}</div>
-      <div class="ai-row"><select id="aiTestDevice">${deviceOptions(s.deviceId)}</select><button type="button" id="inputEnableBtn">Test input</button></div>`;
+      <button type="button" id="recDiagBtn">Copy recording diagnostics</button>`;
     const lat = host.querySelector("#latencySlider");
     lat.addEventListener("input", () => { saveSetting(LS_LATENCY, lat.value); host.querySelector("#latencyVal").textContent = lat.value + " ms"; });
-    const sel = host.querySelector("#aiTestDevice");
-    const btn = host.querySelector("#inputEnableBtn");
-    const fill = async () => { await refreshDeviceList(); sel.innerHTML = deviceOptions(settings().deviceId); };
-    fill();
-    navigator.mediaDevices?.addEventListener?.("devicechange", async () => { await fill(); renderSidebarTracks(); });
-    sel.addEventListener("change", () => { saveSetting(LS_DEVICE, sel.value); if (trackInputs.has("__test")) startTest(); });
-    const startTest = async () => {
-      releaseInput("__test");
-      try {
-        await acquireInput("__test", { deviceId: sel.value, channel: "auto", gainDb: 0, processing: false });
-        await fill(); // labels become available after permission is granted
-        btn.textContent = "Stop test"; btn.classList.add("on");
-        statusEl.textContent = "Input test running: speak into the mic and watch the meter.";
-      } catch (e) { statusEl.textContent = "Input unavailable: " + e.message; }
-    };
-    btn.addEventListener("click", () => {
-      if (trackInputs.has("__test")) { releaseInput("__test"); closeUnusedDevices(); btn.textContent = "Test input"; btn.classList.remove("on"); }
-      else startTest();
+    host.querySelector("#recDiagBtn").addEventListener("click", async () => {
+      const info = {
+        lastRecording: lastDiagnostics,
+        openInputs: [...trackInputs.values()].map(ti => ({ owner: ti.owner, device: ti.dev.label, channels: ti.dev.channels, route: ti.cfgSig, gain: ti.gain.gain.value })),
+        tracks: tracks.filter(t => t.type === "audio").map(t => ({ name: t.name, armed: !!t.armed, monitor: !!t.monitor, input: t.input })),
+        audioContext: (() => { try { const c = ensureAudioContext(); return { state: c.state, sampleRate: c.sampleRate, worklets: !!c.__wawWorklets }; } catch (e) { return String(e); } })(),
+        userAgent: navigator.userAgent
+      };
+      const text = JSON.stringify(info, null, 2);
+      try { await navigator.clipboard.writeText(text); statusEl.textContent = "Recording diagnostics copied to the clipboard."; }
+      catch (e) { console.info(text); statusEl.textContent = "Could not access the clipboard; diagnostics were written to the browser console."; }
     });
+    navigator.mediaDevices?.addEventListener?.("devicechange", async () => { await refreshDeviceList(); renderSidebarTracks(); });
   }
 
   document.addEventListener("DOMContentLoaded", buildInputPanel);
@@ -808,7 +872,7 @@
     beginTrackRecording, endTrackRecording, isRecordingAudio, recordTargets,
     addAudioClip, collectAudioEvents, scheduleAudioEvent, trimAudioClip, drawClipWave,
     importFilesToTrack, openClipEditor, sampleDuration, resetMonitoring, refreshEditor,
-    trackPanelHtml, attachTrackPanel,
+    trackPanelHtml, attachTrackPanel, get lastDiagnostics() { return lastDiagnostics; },
     // legacy names
     openInput: () => syncInputs(), closeInput: () => {}
   };

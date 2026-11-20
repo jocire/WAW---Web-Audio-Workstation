@@ -1631,6 +1631,16 @@ function restoreSnapshot(snap) {
     track.type = TRACK_TYPES.has(track.type) ? track.type : "midi";
     track.notes = Array.isArray(track.notes) ? track.notes : [];
     track.clips = Array.isArray(track.clips) ? track.clips : [];
+    // repair clips saved with NaN positions (takes recorded while the playhead was NaN):
+    // move them to the song start so they become visible and playable again
+    track.clips.forEach(c => {
+      if (Number.isFinite(c.startSec) && Number.isFinite(c.endSec) && c.endSec > c.startSec) return;
+      const len = Number.isFinite(c.endSec - c.startSec) && c.endSec > c.startSec ? c.endSec - c.startSec
+        : (c.audio?.sampleId && window.WAWSamples?.get(c.audio.sampleId)?.duration) || 4;
+      c.startSec = 0;
+      c.endSec = len;
+    });
+    track.notes = track.notes.filter(n => Number.isFinite(n.startSec) && Number.isFinite(n.endSec));
     track.instrument = TRACK_INSTRUMENTS.has(track.instrument) ? track.instrument : "synth";
     track.mono = !!track.mono;
     track.volume = Number.isFinite(track.volume) ? track.volume : 1;
@@ -4052,8 +4062,8 @@ function ensureAudioContext() {
     recordingLoopLen = loopEndSec - loopStartSec;
   } else {
     recordingBaseSec =
-      (playheadWasManuallySet && lastPlayheadSec != null)
-        ? lastPlayheadSec
+      (playheadWasManuallySet && Number.isFinite(lastPlayheadSec))
+        ? Math.max(0, lastPlayheadSec)
         : 0;
     recordingLoopLen = 0;
   }
@@ -5135,8 +5145,15 @@ function drawAllLoopBars(playheadSec = null) {
 
 // Set playhead position (in seconds)
 function setPlayhead(sec) {
-  lastPlayheadSec = Math.max(0, sec);
-  playheadWasManuallySet = true;
+  // called without an argument at startup: Math.max(0, undefined) made the
+  // playhead NaN, so every recording without a loop was placed at NaN
+  if (!Number.isFinite(sec)) {
+    lastPlayheadSec = Number.isFinite(lastPlayheadSec) ? lastPlayheadSec : 0;
+    playheadWasManuallySet = false;
+  } else {
+    lastPlayheadSec = Math.max(0, sec);
+    playheadWasManuallySet = true;
+  }
 
   // redraw views safely
   drawSequencerRuler(lastPlayheadSec);
