@@ -161,6 +161,7 @@
             <button type="button" class="vs-nav" data-nav="1" aria-label="Next preset">▶</button>
           </div>
           <div class="vs-head-btns">
+            <button type="button" data-act="seq" class="vs-seq-btn" title="Step sequencer">Seq</button>
             <button type="button" data-act="browse">Presets</button>
             <button type="button" data-act="save">Save</button>
             <button type="button" data-act="random" title="Random patch">Random</button>
@@ -169,6 +170,7 @@
           </div>
         </header>
         <div class="vs-panel"></div>
+        <div class="vs-seq sq-wrap" hidden></div>
         <div class="vs-keys-wrap">
           <div class="vs-oct"><button type="button" data-oct="-1" aria-label="Octave down">◀</button><span class="vs-oct-val"></span><button type="button" data-oct="1" aria-label="Octave up">▶</button></div>
           <div class="vs-keys"></div>
@@ -185,6 +187,7 @@
       if (nav) stepPreset(Number(nav));
       if (a === "close") close();
       else if (a === "browse") toggleBrowser();
+      else if (a === "seq") toggleSeq();
       else if (a === "save") saveUserPreset();
       else if (a === "random") randomPatch();
       else if (a === "init") loadPreset({ name: "Init", patch: {} });
@@ -288,6 +291,24 @@
     drawEnvs();
     updateDisplay();
     buildKeys();
+    renderSeq();
+  }
+
+  // ---- step sequencer strip ----
+  const LS_SEQ = "waw.synthSeqOpen";
+  function seqOpen() { try { return localStorage.getItem(LS_SEQ) === "1"; } catch (e) { return false; } }
+  function toggleSeq(force) {
+    const on = force ?? !seqOpen();
+    try { localStorage.setItem(LS_SEQ, on ? "1" : "0"); } catch (e) {}
+    if (!on) window.WAWStepSeq?.stop();
+    renderSeq();
+  }
+  function renderSeq() {
+    const box = modal.querySelector(".vs-seq");
+    const on = seqOpen() && !!window.WAWStepSeq;
+    box.hidden = !on;
+    modal.querySelector(".vs-seq-btn")?.classList.toggle("on", on);
+    if (on && track) window.WAWStepSeq.renderSynth(box, track);
   }
 
   // ---------------------------------------------------------------------------
@@ -425,7 +446,7 @@
     }).join("");
     kb.style.setProperty("--whites", whiteIdx);
     const held = new Map();
-    const on = (el, pointerId) => { const n = Number(el.dataset.n); if (held.has(pointerId) && held.get(pointerId) === n) return; off(pointerId); held.set(pointerId, n); el.classList.add("down"); previewNoteOn(n, 105, track); };
+    const on = (el, pointerId) => { const n = Number(el.dataset.n); if (held.has(pointerId) && held.get(pointerId) === n) return; off(pointerId); held.set(pointerId, n); el.classList.add("down"); previewNoteOn(n, 105, track); window.WAWStepSeq?.noteIn(n); };
     const off = (pointerId) => { const n = held.get(pointerId); if (n == null) return; held.delete(pointerId); kb.querySelector(`[data-n="${n}"]`)?.classList.remove("down"); previewNoteOff(n, track?.id); };
     kb.onpointerdown = (e) => { const k = e.target.closest(".vs-key"); if (!k) return; e.preventDefault(); try { kb.setPointerCapture(e.pointerId); } catch (_) {} on(k, e.pointerId); };
     kb.onpointermove = (e) => { if (!held.has(e.pointerId)) return; const k = document.elementFromPoint(e.clientX, e.clientY)?.closest?.(".vs-key"); if (k && kb.contains(k)) on(k, e.pointerId); };
@@ -442,7 +463,7 @@
     modal.classList.add("visible");
     modal.querySelector(".vs-dialog").focus?.();
   }
-  function close() { modal?.classList.remove("visible"); toggleBrowser(false); window.WAWCollab?.notifyChange?.(); }
+  function close() { modal?.classList.remove("visible"); toggleBrowser(false); window.WAWStepSeq?.stop(); window.WAWCollab?.notifyChange?.(); }
   /** after undo / remote edits the track object may have been replaced */
   function refresh() {
     if (!modal?.classList.contains("visible") || !track) return;

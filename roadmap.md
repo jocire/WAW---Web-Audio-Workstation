@@ -73,6 +73,14 @@ WAV export, so what you hear is what you export.
   snappy, noise, hat/tom decay, bell tune, drive, stereo, volume) and 16 instrument
   channels (level, tune, decay, tone, snappy, pan + trigger pad); 37 factory kits in 8
   styles plus user kits; all 592 kit voices stay below full scale at full velocity.
+- Step sequencers (SEQ button in both panels):
+  - Synth: monophonic analog-style sequencer, up to 32 steps (note, on/off, accent, slide),
+    rate 1/8…1/32 incl. triplets, swing, gate, transpose / octave, random-in-key, and step
+    input from the on-screen keys, the computer keyboard or MIDI.
+  - Drum machine: 16 instruments × up to 32 steps (off / on / accent), drag painting,
+    14 starter beats, rate and swing.
+  - Both preview at the song tempo and copy to a regular MIDI clip at the playhead
+    (×1/×2/×4/×8, first free spot on the track). Patterns are saved with the track.
 - Drum Synth: 16 voices modelled after analog circuits (bridged-T resonators, six-oscillator
   metal bank for hats/cymbal, two-oscillator cowbell, multi-trigger clap), per-voice
   tune/decay/level, stereo spread. No samples.
@@ -194,7 +202,8 @@ WAV export, so what you hear is what you export.
 12. Mobile/touch layout for the console and pads.
 
 ### Ideas
-- Pattern-based step sequencer view for the Drum Synth and Sampler.
+- Play step patterns in sync with the song transport (pattern clips), and a step grid for
+  the Sampler.
 - MIDI learn for knobs/faders; MCU/HUI control-surface support via Web MIDI.
 - Spectrum analyzer / loudness (LUFS) meter on the master.
 - Session recording of the collaboration chat into the project.
