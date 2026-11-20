@@ -255,9 +255,9 @@
     pushHistory();
     const p = position(sec);
     const start = barToSec(p.bar);
-    // a new section is 4 bars long (or up to the next marker); resize it with its right edge
+    // a new section is 1 bar long (or up to the next marker); stretch it with its right edge
     const next = state.markers.filter(m => m.sec > start + 1e-6).sort((a, b) => a.sec - b.sec)[0];
-    const end = Math.min(barToSec(p.bar + 4), next ? next.sec : Infinity);
+    const end = Math.min(barToSec(p.bar + 1), next ? next.sec : Infinity);
     state.markers.push({ id: uid(), sec: start, end, name: name || `Section ${state.markers.length + 1}`, color: MARKER_COLORS[state.markers.length % MARKER_COLORS.length] });
     state.markers.sort((a, b) => a.sec - b.sec);
     changed();
