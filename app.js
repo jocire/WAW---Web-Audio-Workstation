@@ -1525,6 +1525,8 @@ function restoreSnapshot(snap) {
     renderMixer();
     // open editors hold references to the replaced track/clip objects
     window.WAWSampler?.refreshIfStale?.();
+    window.WAWSynthPanel?.refresh?.();
+    window.WAWDrumPanel?.refresh?.();
     window.WAWAudio?.refreshEditor?.();
     window.WAWAudio?.syncMonitoring?.();
     updateUndoRedoButtons();
@@ -3505,6 +3507,8 @@ function snapEndToCommonBars(endSec, bpm, beatsPerBar = 4) {
   function open808Modal() {
     const track = getActiveTrack();
     if (track?.instrument !== "808") return;
+    // drum machine front panel (js/drumpanel.js); the old dialog is the fallback
+    if (window.WAWDrumPanel) { window.WAWDrumPanel.open(track); return; }
     renderCustom808Presets();
     load808PatchToUI(track.drum808Patch);
     render808ModalPads();
@@ -3731,6 +3735,8 @@ function snapEndToCommonBars(endSec, bpm, beatsPerBar = 4) {
   function openSynthModal() {
     const track = getActiveTrack();
     if (track?.instrument !== "synth") return;
+    // analog front panel (js/synthpanel.js); the old slider dialog is the fallback
+    if (window.WAWSynthPanel) { window.WAWSynthPanel.open(track); return; }
     loadSynthPatchToUI(track.synthPatch);
     synthModal?.classList.add("visible");
   }

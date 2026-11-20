@@ -11,7 +11,7 @@
   // the six oscillator frequencies of the 808 metal section (Hz)
   const METAL_FREQS = [205.3, 304.4, 369.6, 522.7, 540, 800];
 
-  const VOICE_DEFAULTS = { tune: 0, decay: 1, level: 1 };
+  const VOICE_DEFAULTS = { tune: 0, decay: 1, level: 1 }; // optional per voice: tone, snap, pan
 
   function voiceSettings(kit, id) {
     return { ...VOICE_DEFAULTS, ...((kit.voices || {})[id] || {}) };
@@ -28,11 +28,11 @@
     const t0 = Math.max(when, ctx.currentTime);
     const vel = clamp(velocity / 127, 0.02, 1.2);
     const pitch = (kit.pitch ?? 1) * Math.pow(2, (vs.tune || 0) / 12);
-    const tone = kit.tone ?? 1;
+    const tone = Number.isFinite(vs.tone) ? vs.tone : (kit.tone ?? 1);
     const decayScale = (kit.decay ?? 1) * (vs.decay ?? 1);
     const punch = kit.punch ?? 0.8;
     const noiseLevel = kit.noise ?? 0.7;
-    const snap = kit.snap ?? 0.55;
+    const snap = Number.isFinite(vs.snap) ? vs.snap : (kit.snap ?? 0.55);
     const sources = [];
 
     // voice output -> kit drive -> kit pan -> destination
@@ -44,10 +44,15 @@
       sh.curve = makeDriveCurve(kit.drive);
       sh.oversample = "2x";
       node.connect(sh); node = sh;
+      // the shaper pushes hits up to full scale and panning can add more on one
+      // side: trim with the drive amount so driven kits keep headroom
+      const trim = ctx.createGain();
+      trim.gain.value = 1 / (1 + kit.drive * 0.5);
+      node.connect(trim); node = trim;
     }
     if (ctx.createStereoPanner) {
       const pn = ctx.createStereoPanner();
-      pn.pan.value = clamp((kit.pan ?? 0) + (VOICE_PAN[voiceId] || 0) * (kit.stereo ?? 0.5), -1, 1);
+      pn.pan.value = clamp((kit.pan ?? 0) + (Number.isFinite(vs.pan) ? vs.pan : (VOICE_PAN[voiceId] || 0) * (kit.stereo ?? 0.5)), -1, 1);
       node.connect(pn); node = pn;
     }
     node.connect(destination);
@@ -119,7 +124,7 @@
       case "snare": {
         resonator(180 * pitch, 0.14 * decayScale, 0.55, 1.35, 0.01, "sine");
         resonator(330 * pitch, 0.09 * decayScale, 0.35, 1.25, 0.008, "sine");
-        noise((0.12 + 0.2 * decayScale) * (0.6 + snap * 0.6), 0.75 * noiseLevel * (0.5 + snap * 0.8), "highpass", 1800 + tone * 1500);
+        noise((0.12 + 0.2 * decayScale) * (0.6 + snap * 0.6), 0.58 * noiseLevel * (0.5 + snap * 0.8), "highpass", 1800 + tone * 1500);
         noise(0.06, 0.25 * noiseLevel, "bandpass", 5000 + tone * 2000, 1.2);
         break;
       }
@@ -189,7 +194,7 @@
         break;
       }
       case "maracas":
-        noise(0.03 + snap * 0.03, 0.45 * noiseLevel + 0.1, "highpass", 6000 + tone * 2000, 0.8, 0.004);
+        noise(0.03 + snap * 0.03, 0.28 * noiseLevel + 0.06, "highpass", 6000 + tone * 2000, 0.8, 0.004);
         break;
       default:
         noise(0.1, 0.4 * noiseLevel, "highpass", 2400);
