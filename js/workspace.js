@@ -84,7 +84,12 @@
     copy.id = "trk_" + Math.random().toString(36).slice(2, 9);
     copy.name = t.name + " Copy";
     copy.clips = (copy.clips || []).map(c => ({ ...c, id: "clip_" + Math.random().toString(36).slice(2, 9) }));
-    (copy.inserts || []).forEach(fx => { fx.id = "fx_" + Math.random().toString(36).slice(2, 9); });
+    (copy.inserts || []).forEach(fx => {
+      const oldId = fx.id;
+      fx.id = "fx_" + Math.random().toString(36).slice(2, 9);
+      // automation lanes of the copied FX must point at the new instance
+      (copy.automation?.lanes || []).forEach(l => { if (l.param.startsWith(`fx.${oldId}.`)) l.param = l.param.replace(`fx.${oldId}.`, `fx.${fx.id}.`); });
+    });
     copy.solo = false; copy.armed = false; copy.monitor = false;
     tracks.splice(ti + 1, 0, normalizeTrack(copy, ti + 1));
     setActiveTrack(ti + 1, { silent: true });
@@ -140,6 +145,7 @@
 
   async function trackButton(t, kind) {
     if (kind === "arm") { toggleArm(t); return; }
+    if (kind === "auto") { window.WAWAutomation?.toggleShow(t); return; }
     if (kind === "monitor") {
       await window.WAWAudio.setMonitor(t, !t.monitor);
       refreshAll();
@@ -221,7 +227,9 @@
     const right = new Clip({ startSec: at, endSec: clip.endSec, notesSnapshot: [] });
     right.name = (clip.name || "Clip") + " (2)";
     if (clip.audio) {
-      right.audio = { ...clip.audio, offset: clip.audio.offset + (at - clip.startSec), fadeIn: 0.003 };
+      const k = window.WAWWarp ? window.WAWWarp.factor(clip) : 1;
+      right.audio = { ...clip.audio, offset: clip.audio.offset + (at - clip.startSec) / k, fadeIn: 0.003 };
+      window.WAWComp?.splitTakes(clip, right, at - clip.startSec);
       clip.audio.fadeOut = Math.min(clip.audio.fadeOut || 0.003, 0.003);
     } else {
       const local = getClipLocalNotes(clip);
@@ -321,11 +329,7 @@
   }
 
   function formatPosition(sec) {
-    const bpm = parseFloat(bpmInput?.value) || 120;
-    const beats = (sec || 0) * bpm / 60;
-    const bar = Math.floor(beats / 4) + 1;
-    const beat = Math.floor(beats % 4) + 1;
-    const tick = Math.floor((beats % 1) * 960);
+    const { bar, beat, tick } = window.WAWTempo.position(sec || 0);
     const m = Math.floor((sec || 0) / 60);
     const s = ((sec || 0) % 60);
     return { bbt: `${String(bar).padStart(3, " ")}.${beat}.${String(tick).padStart(3, "0")}`, time: `${m}:${s.toFixed(3).padStart(6, "0")}` };

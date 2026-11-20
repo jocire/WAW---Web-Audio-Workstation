@@ -7,52 +7,78 @@
   "use strict";
   const S = () => window.WAWSamples;
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const dbToGain = db => Math.pow(10, db / 20);
   const LS_DEVICE = "waw.inputDevice";
   const LS_CHANNELS = "waw.inputChannels";
   const LS_LATENCY = "waw.latencyOffsetMs";
 
   // ---------------------------------------------------------------------------
-  // Input manager
+  // Input engine
+  //
+  // Every audio track has its own input routing (track.input):
+  //   { deviceId: "" = default input, channel: "auto" | "stereo" | "1".."8",
+  //     gainDb: input gain (-24..+40), processing: browser auto-gain/noise
+  //     suppression on/off }
+  // Physical devices are opened once and shared by all tracks that use them;
+  // each track gets its own channel routing, gain, meter, monitor tap and
+  // recorder. A device is closed when no armed/monitoring track needs it.
   // ---------------------------------------------------------------------------
-  const input = {
-    stream: null, deviceId: null, source: null, gain: null, splitter: null, merger: null,
-    analyser: null, monitorTaps: new Map(), ctx: null
-  };
+  const devices = new Map();      // key -> { key, deviceId, processing, ctx, stream, source, splitter, channels, label }
+  const trackInputs = new Map();  // owner id -> { owner, dev, cfgSig, merger, gain, analyser, tap }
+  const knownChannels = new Map(); // deviceId -> channel count (for the UI)
 
   function settings() {
-    let deviceId = "", channels = "stereo", latency = 0;
+    let deviceId = "", channels = "auto", latency = 0;
     try {
       deviceId = localStorage.getItem(LS_DEVICE) || "";
-      channels = localStorage.getItem(LS_CHANNELS) || "stereo";
+      channels = localStorage.getItem(LS_CHANNELS) || "auto";
       latency = parseFloat(localStorage.getItem(LS_LATENCY)) || 0;
     } catch (e) {}
     return { deviceId, channels, latency };
   }
   function saveSetting(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 
+  /** default routing for a new audio track: the device chosen in the Audio Input panel */
+  function defaultInputCfg() {
+    const s = settings();
+    return { deviceId: s.deviceId, channel: s.channels === "left" ? "1" : s.channels === "right" ? "2" : (s.channels || "auto"), gainDb: 0, processing: false };
+  }
+  function inputCfg(track) {
+    if (!track.input || typeof track.input !== "object") track.input = defaultInputCfg();
+    const i = track.input;
+    if (typeof i.deviceId !== "string") i.deviceId = "";
+    if (!i.channel) i.channel = "auto";
+    if (!Number.isFinite(i.gainDb)) i.gainDb = 0;
+    i.processing = !!i.processing;
+    return i;
+  }
+
   async function listInputs() {
     if (!navigator.mediaDevices?.enumerateDevices) return [];
     const devs = await navigator.mediaDevices.enumerateDevices();
-    return devs.filter(d => d.kind === "audioinput");
+    return devs.filter(d => d.kind === "audioinput" && d.deviceId !== "communications");
   }
 
-  /** raw (unprocessed) input stream; falls back to the default device when the
-   *  saved device id is stale (ids change after permission resets / replugging) */
-  async function getInputStream(deviceId) {
+  /**
+   * Raw input stream. Falls back to the default device when the saved id is
+   * stale (ids change after permission resets / replugging).
+   * Note: no `latency` / `channelCount` *requirements* — some USB devices
+   * were opened in a bad configuration with them.
+   */
+  async function getInputStream(deviceId, processing = false) {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("this browser has no microphone access (needs HTTPS or localhost)");
     const constraints = (id) => ({
       audio: {
         deviceId: id ? { exact: id } : undefined,
-        echoCancellation: false, noiseSuppression: false, autoGainControl: false,
-        channelCount: { ideal: 2 }, latency: { ideal: 0 }
+        echoCancellation: processing, noiseSuppression: processing, autoGainControl: processing,
+        channelCount: { ideal: 2 }
       }, video: false
     });
     try {
       return await navigator.mediaDevices.getUserMedia(constraints(deviceId));
     } catch (err) {
       if (deviceId && (err.name === "OverconstrainedError" || err.name === "NotFoundError" || err.name === "NotReadableError")) {
-        console.warn("saved input device unavailable, using the default input", err);
-        saveSetting(LS_DEVICE, "");
+        console.warn("input device unavailable, using the default input", err);
         statusEl.textContent = "Selected input not found, using the default input.";
         return navigator.mediaDevices.getUserMedia(constraints(""));
       }
@@ -60,125 +86,226 @@
     }
   }
 
-  async function openInput() {
+  function deviceKey(deviceId, processing) { return (deviceId || "default") + (processing ? "|proc" : ""); }
+
+  async function openDevice(deviceId, processing) {
     const ctx = ensureAudioContext();
-    const { deviceId, channels } = settings();
-    if (input.stream && input.deviceId === deviceId && input.ctx === ctx) return input;
-    closeInput();
-    const stream = await getInputStream(deviceId);
-    input.ctx = ctx;
-    input.stream = stream;
-    input.deviceId = deviceId;
-    input.source = ctx.createMediaStreamSource(stream);
-    input.gain = ctx.createGain();
-    const slider = parseFloat(document.getElementById("inputGainSlider")?.value);
-    input.gain.gain.value = Number.isFinite(slider) ? slider : 1;
-    // channel routing: stereo, or mono from left/right (sent to both sides)
-    input.splitter = ctx.createChannelSplitter(2);
-    input.merger = ctx.createChannelMerger(2);
-    input.source.connect(input.splitter);
-    // most USB / headset mics deliver ONE channel: in "stereo" mode that ended up
-    // on the left side only, so treat a mono device as mono-to-both
-    const devChannels = stream.getAudioTracks()[0]?.getSettings?.().channelCount || 2;
-    input.deviceChannels = devChannels;
-    if (channels === "left" || channels === "right" || devChannels < 2) {
-      const ch = channels === "right" && devChannels >= 2 ? 1 : 0;
-      input.splitter.connect(input.merger, ch, 0);
-      input.splitter.connect(input.merger, ch, 1);
-    } else {
-      input.splitter.connect(input.merger, 0, 0);
-      input.splitter.connect(input.merger, 1, 1);
+    if (ctx.state !== "running") { try { await ctx.resume(); } catch (e) {} }
+    const key = deviceKey(deviceId, processing);
+    let d = devices.get(key);
+    if (d && d.ctx === ctx && d.stream.active) return d.ready || d;
+    if (d) closeDevice(d);
+    d = { key, deviceId, processing, ctx };
+    devices.set(key, d);
+    d.ready = (async () => {
+      const stream = await getInputStream(deviceId, processing);
+      const tr = stream.getAudioTracks()[0];
+      const source = ctx.createMediaStreamSource(stream);
+      const channels = clamp(tr?.getSettings?.().channelCount || source.channelCount || 2, 1, 32);
+      const splitter = ctx.createChannelSplitter(Math.max(2, channels));
+      source.connect(splitter);
+      Object.assign(d, { stream, source, splitter, channels, label: tr?.label || "Input" });
+      knownChannels.set(deviceId || "", channels);
+      // device names/ids are only exposed after permission: refresh the menus
+      if (!deviceList.some(x => x.label)) refreshDeviceList().then(refreshInputUi);
+      // a device that disappears (unplugged) ends its track
+      tr?.addEventListener("ended", () => { if (devices.get(key) === d) { closeDevice(d); statusEl.textContent = `Input "${d.label}" disconnected.`; } });
+      delete d.ready;
+      return d;
+    })();
+    try { return await d.ready; }
+    catch (err) { if (devices.get(key) === d) devices.delete(key); throw err; }
+  }
+
+  function closeDevice(d) {
+    trackInputs.forEach((ti, id) => { if (ti.dev === d) releaseInput(id); });
+    try { d.source?.disconnect(); d.splitter?.disconnect(); } catch (e) {}
+    d.stream?.getTracks().forEach(t => t.stop());
+    if (devices.get(d.key) === d) devices.delete(d.key);
+  }
+
+  function routeSig(cfg) { return [deviceKey(cfg.deviceId, cfg.processing), cfg.channel].join("#"); }
+
+  /** per-track (or per-owner) input chain: device channel(s) -> merger -> gain -> meter/recorder/monitor */
+  async function acquireInput(ownerId, cfg) {
+    const ctx = ensureAudioContext();
+    const sig = routeSig(cfg);
+    let ti = trackInputs.get(ownerId);
+    if (ti && ti.cfgSig === sig && ti.dev.ctx === ctx && devices.get(ti.dev.key) === ti.dev) {
+      ti.gain.gain.setTargetAtTime(dbToGain(cfg.gainDb), ctx.currentTime, 0.01);
+      return ti;
     }
-    input.merger.connect(input.gain);
-    input.analyser = ctx.createAnalyser();
-    input.analyser.fftSize = 1024;
-    input.gain.connect(input.analyser);
-    syncMonitoring();
-    startInputMeter();
-    return input;
+    if (ti) releaseInput(ownerId);
+    const dev = await openDevice(cfg.deviceId, cfg.processing);
+    // another call may have won the race while the device was opening
+    const again = trackInputs.get(ownerId);
+    if (again && again.cfgSig === sig && again.dev === dev) return again;
+    if (again) releaseInput(ownerId);
+    const merger = ctx.createChannelMerger(2);
+    const ch = cfg.channel;
+    const n = dev.channels;
+    if (ch === "stereo" || (ch === "auto" && n >= 2)) {
+      dev.splitter.connect(merger, 0, 0);
+      dev.splitter.connect(merger, n >= 2 ? 1 : 0, 1);
+    } else {
+      // mono: one physical channel to both sides (auto + mono device = channel 1)
+      const idx = ch === "auto" ? 0 : clamp((parseInt(ch, 10) || 1) - 1, 0, Math.max(0, n - 1));
+      dev.splitter.connect(merger, idx, 0);
+      dev.splitter.connect(merger, idx, 1);
+    }
+    const gain = ctx.createGain();
+    gain.gain.value = dbToGain(cfg.gainDb);
+    merger.connect(gain);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    gain.connect(analyser);
+    ti = { owner: ownerId, dev, cfgSig: sig, merger, gain, analyser, tap: null, peakHold: -100, createdAt: performance.now() };
+    trackInputs.set(ownerId, ti);
+    startMeters();
+    return ti;
   }
 
-  function closeInput() {
-    input.monitorTaps.forEach(g => { try { g.disconnect(); } catch (e) {} });
-    input.monitorTaps.clear();
-    try { input.source?.disconnect(); input.gain?.disconnect(); } catch (e) {}
-    input.stream?.getTracks().forEach(t => t.stop());
-    input.stream = null; input.source = null; input.gain = null; input.analyser = null;
-    input.splitter = null; input.merger = null;
+  function releaseInput(ownerId) {
+    const ti = trackInputs.get(ownerId);
+    if (!ti) return;
+    trackInputs.delete(ownerId);
+    try { ti.tap?.disconnect(); } catch (e) {}
+    try { ti.gain.disconnect(); ti.merger.disconnect(); } catch (e) {}
+    try { ti.dev.splitter.disconnect(ti.merger); } catch (e) {}
   }
 
-  /** the mixer rebuilt its graph: reconnect monitoring taps to the new channel strips */
+  function closeUnusedDevices() {
+    const used = new Set([...trackInputs.values()].map(ti => ti.dev));
+    devices.forEach(d => { if (!used.has(d) && !d.ready) closeDevice(d); });
+  }
+
+  /** which tracks need a live input: armed or monitoring audio tracks */
+  function needsInput(t) { return t.type === "audio" && (t.armed || t.monitor); }
+
+  let syncing = Promise.resolve();
+  /** open/close inputs and monitor taps so they match the tracks' arm/monitor/routing state */
+  function syncInputs() {
+    syncing = syncing.then(async () => {
+      const want = tracks.filter(needsInput);
+      const wantIds = new Set(want.map(t => t.id));
+      [...trackInputs.keys()].forEach(id => { if (!id.startsWith("__") && !wantIds.has(id) && !captures.has(id)) releaseInput(id); });
+      for (const t of want) {
+        try {
+          const ti = await acquireInput(t.id, inputCfg(t));
+          setTap(ti, t);
+        } catch (err) {
+          statusEl.textContent = `Input for "${t.name}" unavailable: ${err.message}`;
+          if (t.monitor) t.monitor = false;
+        }
+      }
+      closeUnusedDevices();
+      refreshInputUi();
+    }).catch(e => console.warn(e));
+    return syncing;
+  }
+
+  function setTap(ti, track) {
+    const on = !!track.monitor;
+    if (on && !ti.tap) {
+      ti.tap = ti.gain.context.createGain();
+      ti.gain.connect(ti.tap);
+      ti.tap.connect(window.WAWMixer.getTrackInput(track.id));
+    } else if (!on && ti.tap) {
+      try { ti.tap.disconnect(); } catch (e) {}
+      try { ti.gain.disconnect(ti.tap); } catch (e) {}
+      ti.tap = null;
+    }
+  }
+
+  /** the mixer rebuilt its graph: reconnect monitor taps to the new channel strips */
   function resetMonitoring() {
-    input.monitorTaps.forEach(g => { try { g.disconnect(); } catch (e) {} });
-    input.monitorTaps.clear();
-    syncMonitoring();
+    trackInputs.forEach(ti => { try { ti.tap?.disconnect(); } catch (e) {} try { if (ti.tap) ti.gain.disconnect(ti.tap); } catch (e) {} ti.tap = null; });
+    syncInputs();
   }
-
-  /** route live input into the channel strip of every monitoring audio track */
-  function syncMonitoring() {
-    if (!input.gain) return;
-    const want = new Set(tracks.filter(t => t.type === "audio" && t.monitor).map(t => t.id));
-    input.monitorTaps.forEach((g, id) => { if (!want.has(id)) { try { g.disconnect(); } catch (e) {} input.monitorTaps.delete(id); } });
-    want.forEach(id => {
-      if (input.monitorTaps.has(id)) return;
-      const g = input.ctx.createGain();
-      input.gain.connect(g);
-      g.connect(window.WAWMixer.getTrackInput(id));
-      input.monitorTaps.set(id, g);
-    });
-  }
+  const syncMonitoring = () => syncInputs();
 
   async function setMonitor(track, on) {
     track.monitor = on;
-    if (on) { try { await openInput(); } catch (e) { statusEl.textContent = "Input unavailable: " + e.message; track.monitor = false; } }
-    syncMonitoring();
+    await syncInputs();
   }
 
+  function setTrackInput(track, patch) {
+    Object.assign(inputCfg(track), patch);
+    const ti = trackInputs.get(track.id);
+    if (ti && Object.keys(patch).length === 1 && "gainDb" in patch) {
+      ti.gain.gain.setTargetAtTime(dbToGain(track.input.gainDb), ti.gain.context.currentTime, 0.01);
+      return;
+    }
+    if (needsInput(track)) syncInputs();
+  }
+
+  // ---- metering -------------------------------------------------------------
+  const meterBuf = new Float32Array(2048);
+  function readLevel(ti) {
+    ti.analyser.getFloatTimeDomainData(meterBuf);
+    let peak = 0;
+    for (let i = 0; i < meterBuf.length; i++) { const v = Math.abs(meterBuf[i]); if (v > peak) peak = v; }
+    const db = peak > 0 ? 20 * Math.log10(peak) : -100;
+    const now = performance.now();
+    if (db > ti.peakHold || now - (ti.peakAt || 0) > 1500) { ti.peakHold = db; ti.peakAt = now; }
+    if (db > -60) ti.lastSignalAt = now;
+    return db;
+  }
   let meterRaf = null;
-  function startInputMeter() {
+  function startMeters() {
     if (meterRaf) return;
-    const buf = new Float32Array(1024);
     const tick = () => {
       meterRaf = null;
-      const el = document.getElementById("inputMeterBar");
-      if (input.analyser && el) {
-        input.analyser.getFloatTimeDomainData(buf);
-        let peak = 0; for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i]));
-        const db = peak > 0 ? 20 * Math.log10(peak) : -100;
-        el.style.width = clamp((db + 60) / 60, 0, 1) * 100 + "%";
-        el.classList.toggle("hot", db > -3);
-      }
-      if (input.stream) meterRaf = requestAnimationFrame(tick);
+      document.querySelectorAll("[data-input-meter]").forEach(el => {
+        const ti = trackInputs.get(el.dataset.inputMeter);
+        const bar = el.querySelector(".im-bar"), txt = el.querySelector(".im-db");
+        const panel = el.closest(".audio-track-panel");
+        if (!ti) { if (bar) bar.style.width = "0%"; if (txt) txt.textContent = "off"; el.classList.remove("low", "hot"); panel?.classList.remove("no-signal"); return; }
+        const db = readLevel(ti);
+        if (bar) bar.style.width = clamp((db + 60) / 60, 0, 1) * 100 + "%";
+        if (txt) txt.textContent = ti.peakHold <= -99 ? "-∞ dB" : ti.peakHold.toFixed(0) + " dB";
+        el.classList.toggle("hot", ti.peakHold > -3);
+        // nothing above -50 dBFS for a while: the input is (nearly) silent
+        const low = performance.now() - (ti.lastSignalAt || ti.createdAt || 0) > 3000 && ti.peakHold < -50;
+        el.classList.toggle("low", low);
+        panel?.classList.toggle("no-signal", low);
+      });
+      if (trackInputs.size) meterRaf = requestAnimationFrame(tick);
     };
     meterRaf = requestAnimationFrame(tick);
   }
 
   // ---------------------------------------------------------------------------
-  // Capture (AudioWorklet recorder; used by audio tracks and the sampler)
+  // Capture (AudioWorklet recorder) from any input chain
   // ---------------------------------------------------------------------------
-  async function startCapture() {
-    const ctx = ensureAudioContext();
+  const captures = new Map(); // owner id -> capture (keeps its input alive)
+
+  async function captureFrom(ti) {
+    const ctx = ti.gain.context;
     await window.WAWFX.ensureWorklets(ctx);
-    await openInput();
     const node = window.WAWFX.makeWorklet(ctx, "waw-recorder", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: "explicit" });
     if (!node) throw new Error("AudioWorklet recording is not supported in this browser");
     const chunks = [[], []];
-    let startedAt = null;
-    let resolveStop = null;
+    let startedAt = null, resolveStop = null, peak = 0;
     node.port.onmessage = (e) => {
       const m = e.data;
       if (m.type === "started") startedAt = m.time;
-      else if (m.type === "data") m.channels.forEach((c, i) => { if (i < 2) chunks[i].push(c); });
+      else if (m.type === "data") m.channels.forEach((c, i) => {
+        if (i >= 2) return;
+        chunks[i].push(c);
+        for (let k = 0; k < c.length; k += 16) { const v = Math.abs(c[k]); if (v > peak) peak = v; }
+      });
       else if (m.type === "stopped") resolveStop?.();
     };
-    input.gain.connect(node);
+    ti.gain.connect(node);
     // keep the worklet pulled by the graph without making it audible
     const sink = ctx.createGain(); sink.gain.value = 0;
     node.connect(sink); sink.connect(ctx.destination);
     node.port.postMessage({ cmd: "start" });
-    const cleanup = () => { try { input.gain.disconnect(node); } catch (e) {} try { node.disconnect(); sink.disconnect(); } catch (e) {} };
+    const cleanup = () => { try { ti.gain.disconnect(node); } catch (e) {} try { node.disconnect(); sink.disconnect(); } catch (e) {} };
     return {
       get startedAt() { return startedAt; },
+      get peak() { return peak; },
       async stop() {
         await new Promise(res => { resolveStop = res; node.port.postMessage({ cmd: "stop" }); setTimeout(res, 500); });
         cleanup();
@@ -196,11 +323,22 @@
     };
   }
 
+  /** capture from the default input (used by the sampler's pad recording) */
+  async function startCapture(ownerId = "__sampler") {
+    const ti = await acquireInput(ownerId, defaultInputCfg());
+    const cap = await captureFrom(ti);
+    const stop = cap.stop.bind(cap), cancel = cap.cancel.bind(cap);
+    cap.stop = async () => { try { return await stop(); } finally { releaseInput(ownerId); closeUnusedDevices(); } };
+    cap.cancel = () => { cancel(); releaseInput(ownerId); closeUnusedDevices(); };
+    return cap;
+  }
+
   // ---------------------------------------------------------------------------
   // Recording into audio tracks (driven by the transport in app.js)
+  // Each armed track records its own input.
   // ---------------------------------------------------------------------------
-  let takes = null; // { tracks:[...], capture, songStart, loopLen }
-  let pendingBegin = null; // capture still starting (permission prompt, worklet load)
+  let takes = null;        // { items:[{track, capture}], recordingStartTime, recordingBaseSec, recordingLoopLen }
+  let pendingBegin = null; // inputs still opening (permission prompt, worklet load)
 
   function recordTargets() {
     const armed = tracks.filter(t => t.type === "audio" && t.armed);
@@ -213,16 +351,21 @@
     const targets = recordTargets();
     if (!targets.length) return false;
     const p = (async () => {
-      try {
-        const capture = await startCapture();
-        takes = { tracks: targets, capture, recordingStartTime, recordingBaseSec, recordingLoopLen };
-        statusEl.textContent = `Recording audio on ${targets.map(t => t.name).join(", ")}…`;
-        return true;
-      } catch (err) {
-        statusEl.textContent = "Audio recording failed: " + err.message;
-        takes = null;
-        return false;
+      const items = [];
+      for (const track of targets) {
+        try {
+          const ti = await acquireInput(track.id, inputCfg(track));
+          const capture = await captureFrom(ti);
+          captures.set(track.id, capture);
+          items.push({ track, capture });
+        } catch (err) {
+          statusEl.textContent = `Audio recording on "${track.name}" failed: ${err.message}`;
+        }
       }
+      if (!items.length) { takes = null; return false; }
+      takes = { items, recordingStartTime, recordingBaseSec, recordingLoopLen };
+      statusEl.textContent = `Recording audio on ${items.map(i => i.track.name).join(", ")}…`;
+      return true;
     })();
     pendingBegin = p;
     try { return await p; } finally { if (pendingBegin === p) pendingBegin = null; }
@@ -230,51 +373,69 @@
 
   function isRecordingAudio() { return !!takes || !!pendingBegin; }
 
-  async function endTrackRecording() {
-    // the transport may stop before the input finished opening: wait for it so
-    // the capture is stopped instead of running on forever
-    if (pendingBegin) await pendingBegin;
-    if (!takes) return;
-    const t = takes; takes = null;
-    const startedAt = t.capture.startedAt ?? t.recordingStartTime;
-    let buf = await t.capture.stop();
-    if (!buf || buf.length < 256) { statusEl.textContent = "No audio captured."; return; }
+  /** song placement of a take; cycle recordings return every complete pass */
+  function placeTake(buf, startedAt, t) {
     const ctx = ensureAudioContext();
     // latency compensation: input + output latency reported by the browser + user offset
     const autoLatency = (ctx.baseLatency || 0) + (ctx.outputLatency || 0);
     const latency = autoLatency + settings().latency / 1000;
-    // song position of the first captured sample (before any loop wrap)
-    let songStart = t.recordingBaseSec + (startedAt - t.recordingStartTime) - latency;
-    let offset = 0, clipLen = 0, placed = false;
+    const songStart0 = t.recordingBaseSec + (startedAt - t.recordingStartTime) - latency;
     const L = t.recordingLoopLen;
     if (L > 0) {
-      // cycle recording: keep the last complete pass through the loop.
-      // Pass k starts at buffer time first + k*L (first = loop start of pass 0).
-      const first = t.recordingBaseSec - songStart;
+      // pass k starts at buffer time first + k*L (first = loop start of pass 0)
+      const first = t.recordingBaseSec - songStart0;
       const kMin = Math.ceil(-first / L - 1e-9);
       const kMax = Math.floor((buf.duration - first) / L + 1e-9) - 1;
       if (kMax >= kMin) {
-        offset = first + kMax * L;
-        clipLen = L;
-        songStart = t.recordingBaseSec;
-        placed = true;
+        const passes = [];
+        for (let k = kMin; k <= kMax; k++) passes.push(first + k * L);
+        return { songStart: t.recordingBaseSec, len: L, passes };
       }
     }
-    if (!placed) {
-      if (songStart < 0) { offset = -songStart; songStart = 0; }
-      clipLen = buf.duration - offset;
-      // an incomplete cycle pass must not run past the loop end
-      if (L > 0) clipLen = Math.min(clipLen, Math.max(0.01, t.recordingBaseSec + L - songStart));
+    let songStart = songStart0, offset = 0;
+    if (songStart < 0) { offset = -songStart; songStart = 0; }
+    let len = buf.duration - offset;
+    // an incomplete cycle pass must not run past the loop end
+    if (L > 0) len = Math.min(len, Math.max(0.01, t.recordingBaseSec + L - songStart));
+    return { songStart, len, passes: [offset] };
+  }
+
+  async function endTrackRecording() {
+    // the transport may stop before the inputs finished opening: wait, so the
+    // captures are stopped instead of running on forever
+    if (pendingBegin) await pendingBegin;
+    if (!takes) return;
+    const t = takes; takes = null;
+    const results = [];
+    for (const { track, capture } of t.items) {
+      const startedAt = capture.startedAt ?? t.recordingStartTime;
+      const buf = await capture.stop();
+      captures.delete(track.id);
+      results.push({ track, buf, startedAt, peak: capture.peak });
     }
-    if (clipLen <= 0.005) { statusEl.textContent = "No audio captured."; return; }
+    syncInputs();
+    let made = 0, quiet = [];
+    for (const r of results) {
+      if (!r.buf || r.buf.length < 256) continue;
+      const place = placeTake(r.buf, r.startedAt, t);
+      if (place.len <= 0.005) continue;
+      if (r.peak < 0.003) quiet.push(r.track.name); // below about -50 dBFS
+      const id = await S().put(r.buf, `${r.track.name} ${new Date().toLocaleTimeString()}`);
+      const clip = addAudioClip(r.track, id, place.songStart, place.len, place.passes[place.passes.length - 1], `Take ${(r.track.clips?.length || 0) + 1}`);
+      if (place.passes.length > 1) {
+        // cycle recording: every complete pass is kept as a take lane (comping)
+        clip.takes = place.passes.map((off, i) => ({ sampleId: id, offset: off, name: `Pass ${i + 1}` }));
+        clip.activeTake = clip.takes.length - 1;
+        clip.showTakes = true;
+      }
+      made++;
+    }
     // the undo snapshot was taken when recording started, so one undo removes the whole take
-    const id = await S().put(buf, `Audio ${new Date().toLocaleTimeString()}`);
-    t.tracks.forEach(track => {
-      addAudioClip(track, id, songStart, clipLen, offset, `Take ${(track.clips?.length || 0) + 1}`);
-    });
     renderSequencer();
     window.WAWCollab?.notifyChange?.();
-    statusEl.textContent = `Recorded ${clipLen.toFixed(2)} s of audio.`;
+    if (!made) statusEl.textContent = "No audio captured.";
+    else if (quiet.length) statusEl.textContent = `Recorded, but the input on ${quiet.join(", ")} was almost silent: raise its Input gain or turn on Auto gain, and check the mic in the OS sound settings.`;
+    else statusEl.textContent = `Recorded audio on ${made} track(s).`;
   }
 
   function addAudioClip(track, sampleId, startSec, lengthSec, offset = 0, name = null) {
@@ -296,23 +457,32 @@
   }
 
   /** audio playback events overlapping [rangeStart, rangeEnd) */
-  function collectAudioEvents(rangeStart, rangeEnd, { audibleOnly = false } = {}) {
+  function collectAudioEvents(rangeStart, rangeEnd, { audibleOnly = false, clip = null } = {}) {
     const out = [];
+    const addClip = (t, c) => {
+      if (!c.audio?.sampleId || (c.muted && !clip)) return;
+      if (c.endSec <= rangeStart || c.startSec >= rangeEnd) return;
+      // warped clips: k song seconds per source second; comps: one event per segment
+      const k = window.WAWWarp ? window.WAWWarp.factor(c) : 1;
+      const segs = window.WAWComp ? window.WAWComp.segments(c) : [{ src: c.audio, start: 0, end: c.endSec - c.startSec, fadeIn: c.audio.fadeIn || 0, fadeOut: c.audio.fadeOut || 0 }];
+      segs.forEach(sg => {
+        const segStart = c.startSec + sg.start, segEnd = c.startSec + sg.end;
+        if (segEnd <= rangeStart || segStart >= rangeEnd || !sg.src?.sampleId) return;
+        const start = Math.max(segStart, rangeStart);
+        const end = Math.min(segEnd, rangeEnd);
+        out.push({
+          kind: "audio", trackId: t?.id, clipId: c.id, sampleId: sg.src.sampleId, k,
+          start, end, offset: (sg.src.offset || 0) + (start - c.startSec) / k,
+          clipStart: segStart, clipEnd: segEnd,
+          gain: c.audio.gain || 0, fadeIn: sg.fadeIn, fadeOut: sg.fadeOut
+        });
+      });
+    };
+    if (clip) { addClip(tracks.find(t => (t.clips || []).includes(clip)), clip); return out; }
     tracks.forEach(t => {
       if (t.type !== "audio") return;
       if (audibleOnly && !isAudible(t)) return;
-      (t.clips || []).forEach(c => {
-        if (!c.audio?.sampleId || c.muted) return;
-        if (c.endSec <= rangeStart || c.startSec >= rangeEnd) return;
-        const start = Math.max(c.startSec, rangeStart);
-        const end = Math.min(c.endSec, rangeEnd);
-        out.push({
-          kind: "audio", trackId: t.id, clipId: c.id, sampleId: c.audio.sampleId,
-          start, end, offset: (c.audio.offset || 0) + (start - c.startSec),
-          clipStart: c.startSec, clipEnd: c.endSec,
-          gain: c.audio.gain || 0, fadeIn: c.audio.fadeIn || 0, fadeOut: c.audio.fadeOut || 0
-        });
-      });
+      (t.clips || []).forEach(c => addClip(t, c));
     });
     return out;
   }
@@ -322,17 +492,25 @@
    * (for offline rendering, `when` equals the song position).
    */
   function scheduleAudioEvent(ctx, destination, ev, when, lateBy = 0) {
-    const buf = S().get(ev.sampleId);
+    const k = ev.k || 1;
+    // warped: pitch-preserving stretched render when ready, varispeed until then
+    let buf = null, stretched = false;
+    if (Math.abs(k - 1) >= 1e-3 && window.WAWWarp) { buf = window.WAWWarp.getStretched(ev.sampleId, k); stretched = !!buf; }
+    if (!buf) buf = S().get(ev.sampleId);
     if (!buf) { S().load(ev.sampleId); return []; }
     const src = ctx.createBufferSource();
     src.buffer = buf;
+    const rate = Math.abs(k - 1) >= 1e-3 && !stretched ? 1 / k : 1;
+    if (rate !== 1) src.playbackRate.value = rate;
+    // buffer time per song second: 1 (plain/stretched) or 1/k (varispeed)
+    const toBuf = (srcSec) => stretched ? srcSec * k : srcSec;
     const g = ctx.createGain();
     const level = Math.pow(10, (ev.gain || 0) / 20);
     const startT = when + lateBy;
     const songStart = ev.start + lateBy;
     const dur = ev.end - songStart;
     if (dur <= 0.001) return [];
-    const offset = ev.offset + lateBy;
+    const offset = toBuf(ev.offset + lateBy / k);
     if (offset >= buf.duration) return [];
     // fades are defined relative to the clip edges
     const fadeInEnd = ev.clipStart + ev.fadeIn;
@@ -351,7 +529,7 @@
       g.gain.linearRampToValueAtTime(levelAt(ev.end), startT + dur);
     }
     src.connect(g); g.connect(destination);
-    src.start(startT, offset, Math.min(dur, buf.duration - offset));
+    src.start(startT, offset, Math.min(stretched || rate === 1 ? dur : dur * rate, buf.duration - offset));
     return [src];
   }
 
@@ -364,12 +542,15 @@
   function trimAudioClip(clip, origStart, origEnd, origOffset) {
     if (!clip.audio) return;
     const dur = sampleDuration(clip);
+    const k = window.WAWWarp ? window.WAWWarp.factor(clip) : 1;
     // left edge: content stays put, so the offset moves with the edge
-    let newOffset = origOffset + (clip.startSec - origStart);
-    if (newOffset < 0) { clip.startSec -= newOffset; newOffset = 0; }
+    let newOffset = origOffset + (clip.startSec - origStart) / k;
+    if (newOffset < 0) { clip.startSec -= newOffset * k; newOffset = 0; }
+    const dSrc = newOffset - (clip.audio.offset || 0);
     clip.audio.offset = newOffset;
+    if (Math.abs(dSrc) > 1e-9) window.WAWComp?.onTrim(clip, dSrc); // takes + comp follow the edge
     // right edge cannot extend past the end of the sample
-    const maxEnd = clip.startSec + (dur - newOffset);
+    const maxEnd = clip.startSec + (dur - newOffset) * k;
     if (clip.endSec > maxEnd) clip.endSec = maxEnd;
     if (clip.endSec <= clip.startSec + 0.01) clip.endSec = clip.startSec + 0.01;
   }
@@ -378,7 +559,17 @@
     const a = clip.audio;
     if (!a?.sampleId) return;
     if (!S().has(a.sampleId)) { S().load(a.sampleId).then(b => b && canvas.isConnected && drawClipWave(canvas, clip, color)); return; }
-    S().drawWaveform(canvas, a.sampleId, { start: a.offset, end: a.offset + (clip.endSec - clip.startSec), color: color || "rgba(255,255,255,0.8)", gain: Math.pow(10, (a.gain || 0) / 20) });
+    const k = window.WAWWarp ? window.WAWWarp.factor(clip) : 1;
+    const len = clip.endSec - clip.startSec;
+    const opts = { color: color || "rgba(255,255,255,0.8)", gain: Math.pow(10, (a.gain || 0) / 20) };
+    const segs = window.WAWComp?.hasTakes(clip) && clip.comp?.length ? window.WAWComp.segments(clip) : null;
+    if (!segs) { S().drawWaveform(canvas, a.sampleId, { ...opts, start: a.offset, end: a.offset + len / k }); return; }
+    // comp: draw each segment from its take
+    S().drawWaveform(canvas, a.sampleId, { ...opts, start: 0, end: 0, color: "transparent" });
+    segs.forEach((sg, i) => {
+      if (!S().has(sg.src.sampleId)) return;
+      S().drawWaveform(canvas, sg.src.sampleId, { ...opts, keep: true, region: [sg.start / len, sg.end / len], start: sg.src.offset + sg.start / k, end: sg.src.offset + sg.end / k, color: i % 2 ? "rgba(255,255,255,0.8)" : "rgba(191,219,254,0.9)" });
+    });
   }
 
   async function importFilesToTrack(files, trackIndex, atSec) {
@@ -492,49 +683,133 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Input panel UI (device / channels / latency / meter)
+  // UI: per-track input routing (sidebar) + global Audio Input panel
   // ---------------------------------------------------------------------------
-  async function buildInputPanel() {
+  let deviceList = [];
+  async function refreshDeviceList() {
+    try { deviceList = await listInputs(); } catch (e) { deviceList = []; }
+    return deviceList;
+  }
+
+  function deviceOptions(selected) {
+    const opts = [`<option value="">Default input</option>`].concat(deviceList.filter(d => d.deviceId && d.deviceId !== "default").map((d, i) =>
+      `<option value="${escapeHtml(d.deviceId)}" ${d.deviceId === selected ? "selected" : ""}>${escapeHtml(d.label || `Input ${i + 1}`)}</option>`));
+    if (selected && !deviceList.some(d => d.deviceId === selected)) opts.push(`<option value="${escapeHtml(selected)}" selected>(saved device)</option>`);
+    return opts.join("");
+  }
+
+  function channelOptions(deviceId, selected) {
+    const n = Math.max(2, knownChannels.get(deviceId || "") || 2);
+    const list = [["auto", "Auto (mono mic → both sides)"], ["stereo", "Stereo 1+2"]];
+    for (let i = 1; i <= n; i++) list.push([String(i), `Mono — input ${i}`]);
+    return list.map(([v, l]) => `<option value="${v}" ${v === selected ? "selected" : ""}>${l}</option>`).join("");
+  }
+
+  function meterHtml(ownerId) {
+    return `<div class="input-meter" data-input-meter="${escapeHtml(ownerId)}" title="Input level (peak dBFS)"><div class="im-bar"></div><span class="im-db">off</span></div>`;
+  }
+
+  /** sidebar block for an audio track */
+  function trackPanelHtml(t) {
+    const c = inputCfg(t);
+    return `<div class="audio-track-panel">
+      <div class="at-btns">
+        <button type="button" class="edit-synth-btn at-arm ${t.armed ? "on" : ""}">● Arm</button>
+        <button type="button" class="edit-synth-btn at-mon ${t.monitor ? "on" : ""}">Monitor</button>
+      </div>
+      <label class="stack">Input<select class="at-dev">${deviceOptions(c.deviceId)}</select></label>
+      <label class="stack">Channels<select class="at-ch">${channelOptions(c.deviceId, c.channel)}</select></label>
+      <label class="stack">Input gain <span class="at-gain-val">${c.gainDb > 0 ? "+" : ""}${c.gainDb.toFixed(0)} dB</span>
+        <input type="range" class="at-gain" min="-24" max="40" step="1" value="${c.gainDb}"></label>
+      <label class="cp-check"><input type="checkbox" class="at-proc" ${c.processing ? "checked" : ""}> Auto gain + noise suppression</label>
+      ${meterHtml(t.id)}
+      <p class="at-low-hint">No signal from this input. Speak or play into it; if the meter stays empty, raise Input gain, turn on Auto gain, or check the mic level in your OS sound settings.</p>
+      <button type="button" class="edit-synth-btn at-import">Import Audio…</button>
+    </div>`;
+  }
+
+  function attachTrackPanel(root, t, trackIndex) {
+    const stop = e => e.stopPropagation();
+    root.querySelectorAll("select, input, button").forEach(el => el.addEventListener("click", stop));
+    root.querySelector(".at-arm").addEventListener("click", () => window.WAWWorkspace?.trackButton(t, "arm"));
+    root.querySelector(".at-mon").addEventListener("click", () => window.WAWWorkspace?.trackButton(t, "monitor"));
+    root.querySelector(".at-import").addEventListener("click", () => window.WAWWorkspace?.importAudioDialog(trackIndex));
+    root.querySelector(".at-dev").addEventListener("change", (e) => {
+      pushHistory();
+      setTrackInput(t, { deviceId: e.target.value });
+      saveSetting(LS_DEVICE, e.target.value); // new tracks default to the last choice
+      root.querySelector(".at-ch").innerHTML = channelOptions(t.input.deviceId, t.input.channel);
+      window.WAWCollab?.notifyChange?.();
+    });
+    root.querySelector(".at-ch").addEventListener("change", (e) => { pushHistory(); setTrackInput(t, { channel: e.target.value }); window.WAWCollab?.notifyChange?.(); });
+    root.querySelector(".at-proc").addEventListener("change", (e) => { pushHistory(); setTrackInput(t, { processing: e.target.checked }); window.WAWCollab?.notifyChange?.(); });
+    const g = root.querySelector(".at-gain");
+    g.addEventListener("pointerdown", () => beginHistoryGesture());
+    g.addEventListener("input", () => {
+      setTrackInput(t, { gainDb: parseFloat(g.value) || 0 });
+      root.querySelector(".at-gain-val").textContent = `${t.input.gainDb > 0 ? "+" : ""}${t.input.gainDb} dB`;
+    });
+    g.addEventListener("change", () => { commitHistoryGesture(); window.WAWCollab?.notifyChange?.(); });
+    if (!deviceList.length) refreshDeviceList().then(() => { const sel = root.querySelector(".at-dev"); if (sel) sel.innerHTML = deviceOptions(t.input.deviceId); });
+    startMeters();
+  }
+
+  function refreshInputUi() {
+    // channel lists depend on the opened device's channel count
+    document.querySelectorAll(".audio-track-panel .at-ch").forEach(sel => {
+      const row = sel.closest("[data-track-id]") || sel.closest(".track-row");
+      const t = tracks.find(x => x.id === row?.dataset?.trackId) || getActiveTrack();
+      if (t?.type === "audio" && document.activeElement !== sel) sel.innerHTML = channelOptions(inputCfg(t).deviceId, t.input.channel);
+      const dev = sel.closest(".audio-track-panel")?.querySelector(".at-dev");
+      if (t?.type === "audio" && dev && document.activeElement !== dev) dev.innerHTML = deviceOptions(t.input.deviceId);
+    });
+    const test = document.getElementById("aiTestDevice");
+    if (test && document.activeElement !== test) test.innerHTML = deviceOptions(settings().deviceId);
+    startMeters();
+  }
+
+  function buildInputPanel() {
     const host = document.getElementById("audioInputSettings");
     if (!host) return;
     const s = settings();
     host.innerHTML = `
       <div class="subsection-title">Audio Input</div>
-      <label class="stack">Device<select id="inputDeviceSelect"><option value="">Default input</option></select></label>
-      <label class="stack">Channels<select id="inputChannelSelect">
-        <option value="stereo">Stereo (1+2)</option><option value="left">Mono — input 1</option><option value="right">Mono — input 2</option></select></label>
+      <p class="ai-note">Each audio track picks its own input, channels and gain in its track panel. Arm or monitor a track to open its input.</p>
       <label class="stack">Latency offset <span id="latencyVal">${s.latency} ms</span><input type="range" id="latencySlider" min="-200" max="200" step="1" value="${s.latency}"></label>
-      <div class="input-meter"><div id="inputMeterBar"></div></div>
-      <button type="button" id="inputEnableBtn">Enable input</button>`;
-    const devSel = host.querySelector("#inputDeviceSelect");
-    const fill = async () => {
-      const list = await listInputs();
-      devSel.innerHTML = `<option value="">Default input</option>` + list.map((d, i) => `<option value="${escapeHtml(d.deviceId)}">${escapeHtml(d.label || `Input ${i + 1}`)}</option>`).join("");
-      devSel.value = settings().deviceId;
-    };
-    fill();
-    navigator.mediaDevices?.addEventListener?.("devicechange", fill);
-    devSel.addEventListener("change", async () => { saveSetting(LS_DEVICE, devSel.value); if (input.stream) { closeInput(); await openInput().catch(() => {}); } });
-    const chSel = host.querySelector("#inputChannelSelect");
-    chSel.value = s.channels;
-    chSel.addEventListener("change", async () => { saveSetting(LS_CHANNELS, chSel.value); if (input.stream) { closeInput(); await openInput().catch(() => {}); } });
+      <div class="ai-test">${meterHtml("__test")}</div>
+      <div class="ai-row"><select id="aiTestDevice">${deviceOptions(s.deviceId)}</select><button type="button" id="inputEnableBtn">Test input</button></div>`;
     const lat = host.querySelector("#latencySlider");
     lat.addEventListener("input", () => { saveSetting(LS_LATENCY, lat.value); host.querySelector("#latencyVal").textContent = lat.value + " ms"; });
-    host.querySelector("#inputEnableBtn").addEventListener("click", async () => {
-      try { await openInput(); await fill(); statusEl.textContent = "Audio input enabled."; }
-      catch (e) { statusEl.textContent = "Input unavailable: " + e.message; }
-    });
-    document.getElementById("inputGainSlider")?.addEventListener("input", (e) => {
-      if (input.gain) input.gain.gain.value = parseFloat(e.target.value) || 0;
+    const sel = host.querySelector("#aiTestDevice");
+    const btn = host.querySelector("#inputEnableBtn");
+    const fill = async () => { await refreshDeviceList(); sel.innerHTML = deviceOptions(settings().deviceId); };
+    fill();
+    navigator.mediaDevices?.addEventListener?.("devicechange", async () => { await fill(); renderSidebarTracks(); });
+    sel.addEventListener("change", () => { saveSetting(LS_DEVICE, sel.value); if (trackInputs.has("__test")) startTest(); });
+    const startTest = async () => {
+      releaseInput("__test");
+      try {
+        await acquireInput("__test", { deviceId: sel.value, channel: "auto", gainDb: 0, processing: false });
+        await fill(); // labels become available after permission is granted
+        btn.textContent = "Stop test"; btn.classList.add("on");
+        statusEl.textContent = "Input test running: speak into the mic and watch the meter.";
+      } catch (e) { statusEl.textContent = "Input unavailable: " + e.message; }
+    };
+    btn.addEventListener("click", () => {
+      if (trackInputs.has("__test")) { releaseInput("__test"); closeUnusedDevices(); btn.textContent = "Test input"; btn.classList.remove("on"); }
+      else startTest();
     });
   }
 
   document.addEventListener("DOMContentLoaded", buildInputPanel);
 
   window.WAWAudio = {
-    listInputs, openInput, closeInput, getInputStream, setMonitor, syncMonitoring, startCapture,
+    listInputs, getInputStream, setMonitor, syncMonitoring, syncInputs, startCapture, setTrackInput, inputCfg,
     beginTrackRecording, endTrackRecording, isRecordingAudio, recordTargets,
     addAudioClip, collectAudioEvents, scheduleAudioEvent, trimAudioClip, drawClipWave,
-    importFilesToTrack, openClipEditor, sampleDuration, resetMonitoring, refreshEditor
+    importFilesToTrack, openClipEditor, sampleDuration, resetMonitoring, refreshEditor,
+    trackPanelHtml, attachTrackPanel,
+    // legacy names
+    openInput: () => syncInputs(), closeInput: () => {}
   };
 })();

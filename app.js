@@ -103,6 +103,45 @@ const sequencerGrid = document.getElementById("sequencerGrid");
     return quantizeTime(sec, gridSec, swingAmount, true);
   }
 
+  // Re-map every stored song time after a tempo-map edit so content keeps its
+  // bar/beat position (generalises the old uniform BPM rescale).
+  function remapAllTimes(map) {
+    const mapNote = n => { const s = map(n.startSec), e = map(n.endSec); n.startSec = s; n.endSec = Math.max(s + 0.001, e); };
+    tracks.forEach(t => {
+      (t.notes || []).forEach(mapNote);
+      (t.clips || []).forEach(c => {
+        const s0 = c.startSec, e0 = c.endSec;
+        const local = c.audio ? null : getClipLocalNotes(c);
+        c.startSec = map(s0);
+        if (c.audio && !c.audio.warp?.on) {
+          // un-warped audio keeps its real duration (only its position moves)
+          c.endSec = c.startSec + (e0 - s0);
+        } else {
+          c.endSec = Math.max(c.startSec + 0.01, map(e0));
+        }
+        if (local) {
+          c.notesSnapshot = local.map(n => ({ ...n, startSec: map(s0 + n.startSec) - c.startSec, endSec: Math.max(map(s0 + n.startSec) - c.startSec + 0.001, map(s0 + n.endSec) - c.startSec) }));
+        }
+        window.WAWWarp?.onClipRemapped?.(c, s0, e0);
+      });
+      window.WAWAutomation?.remapTrack?.(t, map);
+    });
+    window.WAWAutomation?.remapGlobal?.(map);
+    const lStart = loopStartSec, lEnd = loopEndSec;
+    loopStartSec = map(lStart); loopEndSec = map(lEnd);
+    clipLoopStartSec = map(clipLoopStartSec); clipLoopEndSec = map(clipLoopEndSec);
+    const vEnd = map(viewStartSec + viewDuration);
+    viewStartSec = map(viewStartSec); viewDuration = Math.max(0.5, vEnd - viewStartSec);
+    if (lastPlayheadSec != null) lastPlayheadSec = map(lastPlayheadSec);
+    if (tracks[activeTrackIndex]) notes = tracks[activeTrackIndex].notes;
+    updateTimeView();
+    renderSequencer();
+    drawPianoRoll(lastPlayheadSec);
+    drawVelocityLane();
+    drawAllLoopBars(lastPlayheadSec);
+    restartPlaybackFromCurrentPosition();
+  }
+
 function renderSequencer() {
   if (!sequencerGrid) return;
   ensureTracks();
@@ -132,6 +171,8 @@ function renderSequencer() {
 
   const laneWidthPx = songLen * pxPerSec;
 
+  window.WAWTempo?.buildGlobalRow(sequencerGrid, { pxPerSec, laneWidthPx });
+
   tracks.forEach((t, ti) => {
     if (!t.color) t.color = getTrackColor(ti);
 
@@ -150,6 +191,7 @@ function renderSequencer() {
           <button type="button" class="tb-s ${t.solo ? "on" : ""}" data-tb="solo" title="Solo">S</button>
           <button type="button" class="tb-r ${t.armed ? "on" : ""}" data-tb="arm" title="Record arm">R</button>
           ${t.type === "audio" ? `<button type="button" class="tb-i ${t.monitor ? "on" : ""}" data-tb="monitor" title="Input monitoring">I</button>` : ""}
+          <button type="button" class="tb-a ${t.automation?.show ? "on" : ""} ${(t.automation?.lanes || []).some(l => l.points.length) ? "has" : ""}" data-tb="auto" title="Show automation lanes">A</button>
         </div>
       </div>
       <div class="seq-row-lane"></div>
@@ -205,13 +247,10 @@ function renderSequencer() {
       const xPx = e.clientX - rect.left;
       const rawStartSec = Math.max(0, xPx / pxPerSec);
 
-      const currentBpm = parseFloat(bpmInput?.value) || timelineBpm || 120;
-      const currentSecPerBar = (60 / currentBpm) * 4;
-      const clipLenSec = currentSecPerBar * 4; // Default 4-bar clip
-
-      // Anchor to bar start
-      const startSec = Math.max(0, Math.floor(rawStartSec / currentSecPerBar) * currentSecPerBar);
-      const endSec = startSec + clipLenSec;
+      // Default 4-bar clip anchored to the bar start (follows tempo + meter changes)
+      const startBar = window.WAWTempo.position(rawStartSec).bar;
+      const startSec = window.WAWTempo.barToSec(startBar);
+      const endSec = window.WAWTempo.barToSec(startBar + 4);
 
       // Prevent overlap with existing clips on this track
       const existing = (t.clips || []).find(
@@ -281,6 +320,9 @@ function renderSequencer() {
     });
 
     sequencerGrid.appendChild(row);
+    // automation / take lanes under the track
+    window.WAWAutomation?.appendLanes?.(sequencerGrid, t, ti, { pxPerSec, laneWidthPx });
+    window.WAWComp?.appendLanes?.(sequencerGrid, t, ti, { pxPerSec, laneWidthPx });
   });
 
   // Restore scroll synchronously after DOM rebuild to avoid a 1-frame visual snap
@@ -315,6 +357,24 @@ function getSeqLabelWidth() {
 
 function updateSequencerBackgroundGrid() {
   if (!sequencerGrid) return;
+  if (window.WAWTempo && !window.WAWTempo.isSimple()) {
+    // non-uniform bars: draw the actual bar/beat lines as an SVG background
+    seqGridLabelW = getSeqLabelWidth();
+    const pxPerSec = getSeqPxPerSec();
+    const widthPx = Math.max(sequencerGrid.scrollWidth, sequencerGrid.clientWidth);
+    const lines = window.WAWTempo.gridLines(0, widthPx / pxPerSec, pxPerSec, 8)
+      .filter(l => l.kind !== "sub")
+      .map(l => `<rect x="${(l.sec * pxPerSec).toFixed(1)}" y="0" width="${l.kind === "bar" ? 2 : 1}" height="10" fill="${l.kind === "bar" ? "rgba(96,165,250,0.12)" : "rgba(255,255,255,0.06)"}"/>`).join("");
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(widthPx)}" height="10" preserveAspectRatio="none">${lines}</svg>`;
+    sequencerGrid.style.backgroundColor = "#0a0c14";
+    sequencerGrid.style.backgroundImage = `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}")`;
+    sequencerGrid.style.backgroundSize = `${Math.ceil(widthPx)}px 100%`;
+    sequencerGrid.style.backgroundRepeat = "no-repeat";
+    sequencerGrid.style.backgroundPosition = `${seqGridLabelW}px 0`;
+    return;
+  }
+  sequencerGrid.style.backgroundSize = "";
+  sequencerGrid.style.backgroundRepeat = "";
 
   const bpm = parseFloat(bpmInput?.value) || 120;
   const secPerBeat = 60 / bpm;
@@ -541,7 +601,7 @@ function quantizeClip(trackIndex, clipId) {
   const clipLen = Math.max(0.1, clip.endSec - clip.startSec);
   clip.notesSnapshot = getClipLocalNotes(clip).map(n => {
     const dur = Math.max(0.05, n.endSec - n.startSec);
-    const startSec = Math.min(Math.max(0, quantizeTime(n.startSec, gridSec, swingAmount, true)), Math.max(0, clipLen - 0.05));
+    const startSec = Math.min(Math.max(0, quantizeTime(n.startSec, gridSec, swingAmount, true, clip.startSec)), Math.max(0, clipLen - 0.05));
     return {
       ...n,
       startSec,
@@ -834,7 +894,7 @@ sequencerGrid?.addEventListener("wheel", (e) => {
 
 sequencerGrid.addEventListener("contextmenu", (e) => {
   const lane = e.target.closest(".seq-row-lane");
-  if (!lane) return;
+  if (!lane || lane.closest(".seq-extra-row")) return; // tempo/automation/take lanes have their own menus
   e.preventDefault();
 
   const clipEl = e.target.closest(".seq-clip");
@@ -1341,6 +1401,8 @@ function syncTrackNotesFromClip(track, clip) {
   return {
     tracks: structuredClone(tracks.map(t => ({ ...t }))),
     mixer: window.WAWMixer ? window.WAWMixer.serialize() : undefined,
+    tempoMap: window.WAWTempo ? window.WAWTempo.serialize() : undefined,
+    automation: window.WAWAutomation ? window.WAWAutomation.serializeGlobal() : undefined,
     activeTrackIndex,
     loopStartSec,
     loopEndSec,
@@ -1384,6 +1446,11 @@ function restoreSnapshot(snap) {
   loopStartSec = snap.loopStartSec ?? 0;
   loopEndSec   = snap.loopEndSec ?? 0;
   timelineBpm  = snap.timelineBpm ?? timelineBpm;
+  if (window.WAWTempo) {
+    window.WAWTempo.setState(snap.tempoMap || { tempos: [{ beat: 0, bpm: timelineBpm }] }, timelineBpm);
+    timelineBpm = window.WAWTempo.state.tempos[0].bpm;
+  }
+  window.WAWAutomation?.restoreGlobal?.(snap.automation);
 
   tonicName = snap.tonicName ?? tonicName;
   if (scaleSelect && snap.scaleId) {
@@ -1909,13 +1976,10 @@ function addTrack(_e) {
       // Mount synth controls inside the active track row only
       const instPanel = row.querySelector(".track-instrument-panel");
       if (instPanel && t.type === "audio") {
-        instPanel.innerHTML = `<div class="audio-track-panel">
-          <button type="button" class="edit-synth-btn at-arm ${t.armed ? "on" : ""}">● Arm</button>
-          <button type="button" class="edit-synth-btn at-mon ${t.monitor ? "on" : ""}">Monitor</button>
-          <button type="button" class="edit-synth-btn at-import">Import Audio…</button></div>`;
-        instPanel.querySelector(".at-arm").addEventListener("click", (e) => { e.stopPropagation(); window.WAWWorkspace?.trackButton(t, "arm"); });
-        instPanel.querySelector(".at-mon").addEventListener("click", (e) => { e.stopPropagation(); window.WAWWorkspace?.trackButton(t, "monitor"); });
-        instPanel.querySelector(".at-import").addEventListener("click", (e) => { e.stopPropagation(); window.WAWWorkspace?.importAudioDialog(i); });
+        // per-track input routing (device, channels, gain, meter)
+        instPanel.innerHTML = window.WAWAudio.trackPanelHtml(t);
+        instPanel.dataset.trackId = t.id;
+        window.WAWAudio.attachTrackPanel(instPanel, t, i);
       } else if (instPanel && i === activeTrackIndex && t.instrument === "sampler") {
         instPanel.innerHTML = window.WAWSampler.sidebarPanelHtml(t);
         window.WAWSampler.attachSidebarPanel(instPanel, t);
@@ -2691,6 +2755,13 @@ function addTrack(_e) {
     return;
   }
 
+  // The BPM field edits the tempo map (the tempo in effect at the playhead when
+  // the song has tempo changes); the map re-maps all content times.
+  if (window.WAWTempo) {
+    window.WAWTempo.setBpmFromField(newBpm, window.WAWTempo.state.tempos.length > 1 ? (lastPlayheadSec || 0) : 0);
+    if (window.WAWTempo.state.tempos.length > 1) bpmInput.value = window.WAWTempo.state.tempos[0].bpm;
+    return;
+  }
   // Everything is stored in seconds, so keep musical positions (bars/beats)
   // by rescaling ALL tracks, clips and loop ranges — not just the active track.
   const factor = timelineBpm / newBpm; // higher BPM → shorter seconds
@@ -4272,6 +4343,14 @@ if (trackType === "midi" && targetTrack) {
     const secPerBeat = 60 / bpm;
     if (secPerBeat <= 0) return;
 
+    if (!isPrecount && window.WAWTempo) {
+      const p = window.WAWTempo.position(Math.max(0, songSec) + 1e-6);
+      const key = p.bar * 100 + p.beat;
+      if (key === lastMetroBeatIndex) return;
+      lastMetroBeatIndex = key;
+      playMetronomeTick(p.beat === 1, isPrecount);
+      return;
+    }
     const beatIndex = Math.floor(songSec / secPerBeat + 1e-6);
     if (beatIndex === lastMetroBeatIndex) return;
     lastMetroBeatIndex = beatIndex;
@@ -4812,23 +4891,20 @@ if (trackType === "midi" && targetTrack) {
       ctx.fillRect(gridX0, y, gridWidth, pixelsPerNote);
     }
 
-    // Beat grid
+    // Beat grid (tempo map aware)
     const bpm = parseFloat(bpmInput.value) || 120;
     const secPerBeat = 60 / bpm;
     const viewEndSec = viewStartSec + viewDuration;
-    const firstBeatIndex = Math.floor(viewStartSec / secPerBeat);
-    const lastBeatIndex = Math.ceil(viewEndSec / secPerBeat);
-
-    for (let b = firstBeatIndex; b <= lastBeatIndex; b++) {
-      const beatSec = b * secPerBeat;
-      const x = gridX0 + (beatSec - viewStartSec) * pixelsPerSec;
+    window.WAWTempo.gridLines(viewStartSec, viewEndSec, pixelsPerSec, 6).forEach(l => {
+      if (l.kind === "sub") return;
+      const x = gridX0 + (l.sec - viewStartSec) * pixelsPerSec;
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, h);
-      ctx.strokeStyle = (b % 4 === 0) ? "#27304c" : "#171c30";
-      ctx.lineWidth = (b % 4 === 0) ? 1.2 : 0.7;
+      ctx.strokeStyle = l.kind === "bar" ? "#27304c" : "#171c30";
+      ctx.lineWidth = l.kind === "bar" ? 1.2 : 0.7;
       ctx.stroke();
-    }
+    });
 
     ctx.strokeStyle = "#111425";
     ctx.lineWidth = 0.7;
@@ -4961,38 +5037,28 @@ if (trackType === "midi" && targetTrack) {
     ctx.fillRect(0, 0, leftGutterPx, h);
   }
 
-  const bpm = parseFloat(bpmInput.value) || 120;
-  const secPerBeat = 60 / bpm;
-  const beatsPerBar = 4;
-
   const viewEndSec = viewStart + viewDuration;
-  const firstBeatIndex = Math.floor(viewStart / secPerBeat);
-  const lastBeatIndex  = Math.ceil(viewEndSec / secPerBeat);
+  const rulerPxPerSec = gridWidth / viewDuration;
 
-  const pxPerBeat = (gridWidth / viewDuration) * secPerBeat;
-
-  // beat / bar lines
-  for (let b = firstBeatIndex; b <= lastBeatIndex; b++) {
-    const beatSec = b * secPerBeat;
-    const x = gridX0 + (beatSec - viewStart) * (gridWidth / viewDuration);
-
-    const isBar = (b % beatsPerBar === 0);
+  // beat / bar lines from the tempo map (tempo + meter changes)
+  window.WAWTempo.gridLines(viewStart, viewEndSec, rulerPxPerSec, 7).forEach(l => {
+    if (l.kind === "sub") return;
+    const x = gridX0 + (l.sec - viewStart) * rulerPxPerSec;
+    const isBar = l.kind === "bar";
     ctx.beginPath();
     ctx.moveTo(x, 0);
     ctx.lineTo(x, h);
     ctx.strokeStyle = isBar ? "#27304c" : "#171c30";
     ctx.lineWidth   = isBar ? 1.2 : 0.7;
     ctx.stroke();
-
-    if (isBar && pxPerBeat * beatsPerBar > 28) {
-      const barNum = Math.floor(b / beatsPerBar) + 1;
+    if (isBar && (l.bar - 1) % Math.max(1, l.labelEvery * (rulerPxPerSec * (window.WAWTempo.barToSec(l.bar + 1) - l.sec) < 22 ? 2 : 1)) === 0) {
       ctx.fillStyle = "#7780aa";
       ctx.font = "9px system-ui";
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
-      ctx.fillText(barNum, x + 2, 2);
+      ctx.fillText(l.bar, x + 2, 2);
     }
-  }
+  });
 
   // loop region
   if (loopObj?.enabled && loopObj.end > loopObj.start) {
@@ -5727,6 +5793,21 @@ makeLoopInteractor(seqLoopBarCanvas, () => ({
       "clipMute",
       "deleteClip"
     ];
+    // audio-clip actions (warp, audio quantize, take lanes, comp)
+    const ctxClip = target === "clip" && seqContextTarget ? tracks[seqContextTarget.trackIndex]?.clips?.find(c => c.id === seqContextTarget.clipId) : null;
+    const audioOnly = { audioWarp: !!ctxClip?.audio, audioQuantize: !!ctxClip?.audio, clipTakes: !!ctxClip?.takes?.length, clipFlatten: !!ctxClip?.takes?.length };
+    Object.entries(audioOnly).forEach(([id, show]) => {
+      const btn = contextMenuEl.querySelector(`button[data-action="${id}"]`);
+      if (!btn) return;
+      btn.style.display = show ? "block" : "none";
+      if (id === "audioWarp") btn.textContent = ctxClip?.audio?.warp?.on ? `Warp: on (${ctxClip.audio.warp.srcBpm} BPM source) — turn off` : "Warp to song tempo…";
+      if (id === "clipTakes") btn.textContent = ctxClip?.showTakes ? "Hide take lanes" : `Show take lanes (${ctxClip?.takes?.length || 0})`;
+    });
+    // MIDI-only clip actions make no sense on audio clips
+    ["clipQuantize", "clipHumanize", "clipClear"].forEach(id => {
+      const btn = contextMenuEl.querySelector(`button[data-action="${id}"]`);
+      if (btn && ctxClip?.audio) btn.style.display = "none";
+    });
     clipOnly.forEach(id => {
       const btn = contextMenuEl.querySelector(`button[data-action="${id}"]`);
       if (!btn) return;
@@ -6022,26 +6103,22 @@ makeLoopInteractor(seqLoopBarCanvas, () => ({
 
     if (viewDuration <= 0) viewDuration = 4;
     const localPixelsPerSec = gridWidth / viewDuration;
-    const bpm = parseFloat(bpmInput.value) || 120;
-    const secPerBeat = 60 / bpm;
     const viewEndSec = viewStartSec + viewDuration;
-    const firstBeatIndex = Math.floor(viewStartSec / secPerBeat);
-    const lastBeatIndex = Math.ceil(viewEndSec / secPerBeat);
 
     // Left strip background under piano
     ctx.fillStyle = "#0b0e18";
     ctx.fillRect(0, 0, keyLabelWidth, h);
 
-    for (let b = firstBeatIndex; b <= lastBeatIndex; b++) {
-      const beatSec = b * secPerBeat;
-      const x = gridX0 + (beatSec - viewStartSec) * localPixelsPerSec;
+    window.WAWTempo.gridLines(viewStartSec, viewEndSec, localPixelsPerSec, 6).forEach(l => {
+      if (l.kind === "sub") return;
+      const x = gridX0 + (l.sec - viewStartSec) * localPixelsPerSec;
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, h);
-      ctx.strokeStyle = (b % 4 === 0) ? "#27304c" : "#171c30";
-      ctx.lineWidth = (b % 4 === 0) ? 1.2 : 0.7;
+      ctx.strokeStyle = l.kind === "bar" ? "#27304c" : "#171c30";
+      ctx.lineWidth = l.kind === "bar" ? 1.2 : 0.7;
       ctx.stroke();
-    }
+    });
 
     ctx.beginPath();
     ctx.moveTo(0, h - 2);
@@ -6587,6 +6664,9 @@ function schedulerTick() {
     schedCycle = buildPlaybackCycle(getLiveMixdownForScheduling(), loop.start, loop.end, cycleEnd);
   }
 
+  // automation (read + write) at control rate
+  window.WAWAutomation?.tick(currentSongPos(), now);
+
   // Non-looping playback ended (also works while the tab is in the background,
   // where requestAnimationFrame does not run)
   const dc = displayCycle;
@@ -6596,6 +6676,16 @@ function schedulerTick() {
     const hasLoop = loop.enabled && loop.end > loop.start + 0.05;
     if (!hasLoop && now >= end && !isRecording) stopPlayback();
   }
+}
+
+/** song position (s) being heard right now, or null when stopped */
+function currentSongPos() {
+  if (!isPlaying || !audioCtx) return null;
+  const now = audioCtx.currentTime;
+  let c = displayCycle;
+  if (schedCycle && schedCycle !== c && now >= schedCycle.startTime) c = schedCycle;
+  if (!c) return null;
+  return c.rangeStart + Math.max(0, now - c.startTime);
 }
 
 function startPlaybackCycle(noteArray, startAtSec = null, isLoopRestart = false) {
@@ -6751,6 +6841,7 @@ function animateRecordingTransport() {
     isPlaying = false;
     if (stopBtn) stopBtn.disabled = true;
     clearScheduledNodes();
+    window.WAWAutomation?.onStop();
     drawTransportFrame(null);
   }
 
@@ -6766,8 +6857,13 @@ function animateRecordingTransport() {
     return secPerBeat / 2;
   }
 
-  function quantizeTime(t, gridSec, swing, isStart) {
+  function quantizeTime(t, gridSec, swing, isStart, originSec = 0) {
     if (gridSec <= 0) return t;
+    if (window.WAWTempo && !window.WAWTempo.isSimple()) {
+      // grid as a note value (whole-note fraction), snapped relative to bar starts
+      const whole = gridSec / (4 * 60 / (parseFloat(bpmInput?.value) || timelineBpm || 120));
+      return window.WAWTempo.snapSec(originSec + t, whole, swing, isStart) - originSec;
+    }
     const baseIndex = t / gridSec;
     let idx = Math.round(baseIndex);
 
@@ -6842,11 +6938,23 @@ function animateRecordingTransport() {
     const PPQ = 480;
 
     function secToTicks(sec) {
-      const beats = sec * (bpm / 60);
+      const beats = window.WAWTempo ? window.WAWTempo.secToBeat(sec) : sec * (bpm / 60);
       return Math.round(beats * PPQ);
     }
 
     const timedEvents = [];
+    // tempo + time-signature map (the first tempo is written below)
+    if (window.WAWTempo) {
+      const tm = window.WAWTempo.state;
+      tm.tempos.slice(1).forEach(t => {
+        const us = Math.round(60000000 / t.bpm);
+        timedEvents.push({ tick: Math.round(t.beat * PPQ), order: -1, bytes: [0xFF, 0x51, 0x03, (us >> 16) & 0xFF, (us >> 8) & 0xFF, us & 0xFF] });
+      });
+      tm.sigs.forEach(g => {
+        timedEvents.push({ tick: Math.round(window.WAWTempo.barStartBeat(g.bar) * PPQ), order: -1, bytes: [0xFF, 0x58, 0x04, g.num, Math.round(Math.log2(g.den)), 24, 8] });
+      });
+      bpm = tm.tempos[0].bpm;
+    }
     sorted.forEach(n => {
       timedEvents.push({
         tick: secToTicks(n.startSec),
@@ -7237,6 +7345,8 @@ function animateRecordingTransport() {
     const offline = new OfflineCtx(2, Math.ceil(duration * sampleRateOut), sampleRateOut);
     // Same channel strips, inserts, sends and master chain as realtime playback
     const graph = await window.WAWMixer.createOfflineGraph(offline);
+    window.WAWAutomation?.applyOffline(offline, graph, duration);
+    await window.WAWWarp?.prepareAll(); // warped clips render their stretched audio
     await window.WAWSampler?.preloadForTracks(tracks);
     mixNotes.forEach(n => renderNoteOffline(offline, graph.inputFor(n.trackId), n));
     for (const ev of audioEvents) {
@@ -7596,6 +7706,10 @@ function animateRecordingTransport() {
         }
         else if (action === "clipSplit") window.WAWWorkspace?.splitClipAt(trackIndex, clipId, lastPlayheadSec);
         else if (action === "clipMute") window.WAWWorkspace?.toggleClipMute(trackIndex, clipId);
+        else if (action === "audioWarp") window.WAWWarp?.setWarp(trackIndex, clipId);
+        else if (action === "audioQuantize") window.WAWWarp?.quantizeAudio(trackIndex, clipId);
+        else if (action === "clipTakes") window.WAWComp?.toggleTakes(trackIndex, clipId);
+        else if (action === "clipFlatten") window.WAWComp?.flatten(trackIndex, clipId);
         else if (action === "clipSetLoop") setLoopToClip(trackIndex, clipId);
         else if (action === "clipClear") clearClipNotes(trackIndex, clipId);
         else if (action === "deleteClip") deleteClip(trackIndex, clipId);
