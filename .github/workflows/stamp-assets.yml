@@ -1,0 +1,50 @@
+# Keeps the ?v=<hash> cache-busting stamps on WAW's scripts and stylesheets
+# current, so browsers never combine new and old files after an update
+# (GitHub Pages lets browsers cache files for 10 minutes).
+#
+# Runs on every push to main; if a stamp is out of date it commits the
+# re-stamped index.html / js/fx.js back to main (pushes made with
+# GITHUB_TOKEN do not start this workflow again). GitHub Pages then publishes
+# that commit.
+name: Stamp asset versions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "index.html"
+      - "app.js"
+      - "styles.css"
+      - "js/**"
+      - "css/**"
+      - "tools/stamp_assets.py"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stamp-assets
+  cancel-in-progress: false
+
+jobs:
+  stamp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Stamp asset URLs with content hashes
+        run: python tools/stamp_assets.py
+      - name: Commit updated stamps
+        run: |
+          if git diff --quiet; then
+            echo "Asset stamps already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html js/fx.js
+          git commit -m "Update asset version stamps [skip ci]"
+          git push
