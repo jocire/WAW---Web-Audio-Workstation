@@ -575,6 +575,7 @@
       window.WAWAudio?.syncInputs?.();
       renderSidebarTracks(); renderSequencer(); window.renderMixer();
       window.WAWSampler?.refreshIfStale?.(); window.WAWAudio?.refreshEditor?.();
+      window.WAWSynthPanel?.refresh?.(); window.WAWDrumPanel?.refresh?.();
       if (currentView === "editor") { drawPianoRoll(lastPlayheadSec); drawVelocityLane(); }
       drawAllLoopBars?.(lastPlayheadSec);
       // record how the merged units look locally (normalisation may add

@@ -60,9 +60,19 @@ WAV export, so what you hear is what you export.
   Stereo Width (M/S, mono bass), Utility.
 
 ### Instruments
-- Synth: unison (up to 7, detune/width), sub osc, osc 2 mix/FM/ring-mod with octave and
-  semitone, filter types + 12/24 dB slopes, key tracking, velocity → amp/filter,
-  LFO shapes and targets (pitch/filter/amp/pan), mono/legato glide, 35 presets.
+- Synth ("PS-8" analog front panel): two oscillators (saw / variable-width pulse / square /
+  triangle / sine; octave, semi, fine; osc 2 mix / FM / ring), mixer (osc levels, sub,
+  noise), filter (LP/BP/HP, 12/24 dB, cutoff, resonance, ± envelope amount, key tracking,
+  velocity) with its own ADSR, amp ADSR, LFO (4 waves, rate, depth, delay, pitch / filter /
+  amp / pan), voice (poly/mono, glide, unison up to 7 with spread and width) and output
+  (drive, chorus, delay, reverb, pan, volume); envelope graphs, playable 2-octave keyboard,
+  categorised preset browser with search, user presets, random patch. 160 factory
+  presets in 11 categories (bass, lead, pad, strings, brass, keys, organ, pluck, bells,
+  sequence, FX), level-matched (every preset peaks below full scale on a single note).
+- Drum Synth ("RD-16" drum-machine panel): master section (tune, decay, tone, punch,
+  snappy, noise, hat/tom decay, bell tune, drive, stereo, volume) and 16 instrument
+  channels (level, tune, decay, tone, snappy, pan + trigger pad); 37 factory kits in 8
+  styles plus user kits; all 592 kit voices stay below full scale at full velocity.
 - Drum Synth: 16 voices modelled after analog circuits (bridged-T resonators, six-oscillator
   metal bank for hats/cymbal, two-oscillator cowbell, multi-trigger clap), per-voice
   tune/decay/level, stereo spread. No samples.

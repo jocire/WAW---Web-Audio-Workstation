@@ -24,8 +24,38 @@
     velSens: 0.8,         // velocity -> amplitude
     velToFilter: 0.2,     // velocity -> cutoff
     lfoWave: "sine",
-    polyMode: "poly"      // poly | mono (live playing / glide)
+    polyMode: "poly",     // poly | mono (live playing / glide)
+    // analog-panel additions (defaults keep older patches sounding the same)
+    osc1Level: 1,
+    pulseWidth: 0.5,      // osc 1 pulse width when wave = "pulse" (0.05..0.5)
+    osc2PulseWidth: 0.5,
+    filterSustain: 0,     // filter envelope sustain (0 = classic AD sweep)
+    filterRelease: 0.3,
+    lfoDelay: 0           // LFO fade-in time (s)
   };
+
+  // ---- pulse waves (variable width) as cached PeriodicWaves ----
+  const pulseCache = new WeakMap();
+  function pulseWave(ctx, width) {
+    const w = clamp(Math.round((width ?? 0.5) * 100) / 100, 0.02, 0.98);
+    let m = pulseCache.get(ctx);
+    if (!m) { m = new Map(); pulseCache.set(ctx, m); }
+    if (m.has(w)) return m.get(w);
+    const N = 96;
+    const real = new Float32Array(N + 1), imag = new Float32Array(N + 1);
+    // Fourier series of a pulse with duty cycle w (DC removed)
+    for (let n = 1; n <= N; n++) {
+      real[n] = (2 / (n * Math.PI)) * Math.sin(2 * Math.PI * n * w) * 0.5;
+      imag[n] = (2 / (n * Math.PI)) * (1 - Math.cos(2 * Math.PI * n * w)) * 0.5;
+    }
+    const wave = ctx.createPeriodicWave(real, imag, { disableNormalization: false });
+    m.set(w, wave);
+    return wave;
+  }
+  function setWave(ctx, osc, type, width) {
+    if (type === "pulse") osc.setPeriodicWave(pulseWave(ctx, width));
+    else osc.type = type || "sawtooth";
+  }
 
   function fullPatch(patch) {
     const base = typeof createDefaultSynthPatch === "function" ? createDefaultSynthPatch() : {};
@@ -56,7 +86,7 @@
     const uniGain = 1 / Math.sqrt(unison);
     for (let u = 0; u < unison; u++) {
       const o = ctx.createOscillator();
-      o.type = p.wave;
+      setWave(ctx, o, p.wave, p.pulseWidth);
       const spreadPos = unison === 1 ? 0 : (u / (unison - 1)) * 2 - 1; // -1..1
       o.detune.value = (p.detune || 0) + spreadPos * (p.unisonDetune || 0) / 2;
       if (glideFrom) {
@@ -64,7 +94,7 @@
         o.frequency.exponentialRampToValueAtTime(freq1, t0 + p.glide);
       } else o.frequency.setValueAtTime(freq1, t0);
       const g = ctx.createGain();
-      g.gain.value = uniGain;
+      g.gain.value = uniGain * clamp(p.osc1Level ?? 1, 0, 1.5);
       o.connect(g);
       if (unison > 1 && ctx.createStereoPanner) {
         const pan = ctx.createStereoPanner();
@@ -79,7 +109,7 @@
     const osc2On = p.osc2Wave && p.osc2Wave !== "off";
     if (osc2On) {
       const o2 = ctx.createOscillator();
-      o2.type = p.osc2Wave;
+      setWave(ctx, o2, p.osc2Wave, p.osc2PulseWidth);
       const f2 = mtof(midiNote + 12 * (p.osc2Octave || 0) + (p.osc2Semi || 0));
       o2.frequency.setValueAtTime(f2, t0);
       o2.detune.value = (p.detune || 0) + (p.osc2Detune || 0);
@@ -149,11 +179,27 @@
     const envPeak = clamp(cutoff + (p.filterEnv || 0) * velMul, 30, nyq);
     const fA = Math.max(0.001, p.filterAttack ?? 0.01);
     const fD = Math.max(0.001, p.filterDecay ?? 0.25);
+    const fS = clamp(p.filterSustain ?? 0, 0, 1);
+    const fR = Math.max(0.005, p.filterRelease ?? 0.3);
+    const fSus = clamp(cutoff + (envPeak - cutoff) * fS, 30, nyq);
+    const filterAt = (lvl) => clamp(cutoff + (envPeak - cutoff) * lvl, 30, nyq);
     [f1, f2].forEach(f => {
       if (!f) return;
-      f.frequency.setValueAtTime(cutoff, t0);
-      f.frequency.linearRampToValueAtTime(envPeak, t0 + fA);
-      f.frequency.linearRampToValueAtTime(cutoff, t0 + fA + fD);
+      const fr = f.frequency;
+      fr.setValueAtTime(cutoff, t0);
+      if (t1 == null) {
+        fr.linearRampToValueAtTime(envPeak, t0 + fA);
+        fr.linearRampToValueAtTime(fSus, t0 + fA + fD);
+      } else {
+        // scheduled note: release from the level the envelope actually reached
+        const end = Math.max(t1, t0 + 0.005);
+        let lvl;
+        if (end >= t0 + fA + fD) { fr.linearRampToValueAtTime(envPeak, t0 + fA); fr.linearRampToValueAtTime(fSus, t0 + fA + fD); lvl = fS; }
+        else if (end >= t0 + fA) { fr.linearRampToValueAtTime(envPeak, t0 + fA); lvl = 1 + (fS - 1) * ((end - t0 - fA) / fD); fr.linearRampToValueAtTime(filterAt(lvl), end); }
+        else { lvl = (end - t0) / fA; fr.linearRampToValueAtTime(filterAt(lvl), end); }
+        fr.setValueAtTime(filterAt(lvl), end);
+        fr.linearRampToValueAtTime(cutoff, end + fR);
+      }
     });
 
     // ---- amp envelope ----
@@ -199,7 +245,10 @@
       lfo.type = p.lfoWave || "sine";
       lfo.frequency.value = p.lfoRate;
       const lg = ctx.createGain();
-      lfo.connect(lg);
+      // LFO delay: the modulation fades in over lfoDelay seconds
+      const lfoFade = ctx.createGain();
+      if ((p.lfoDelay ?? 0) > 0.01) { lfoFade.gain.setValueAtTime(0, t0); lfoFade.gain.linearRampToValueAtTime(1, t0 + p.lfoDelay); }
+      lfo.connect(lfoFade); lfoFade.connect(lg);
       const amt = p.lfoAmount; // 0..1000 in the UI
       switch (p.lfoTarget) {
         case "filter":
@@ -237,6 +286,12 @@
           const cur = env.gain.value;
           env.gain.setValueAtTime(cur, t);
           env.gain.linearRampToValueAtTime(0, t + R);
+          [f1, f2].forEach(f => {
+            if (!f) return;
+            f.frequency.cancelScheduledValues(t);
+            f.frequency.setValueAtTime(f.frequency.value, t);
+            f.frequency.linearRampToValueAtTime(cutoff, t + fR);
+          });
         } catch (e) {}
         sources.forEach(s => { try { s.stop(t + R + 0.05); } catch (e) {} });
       }
