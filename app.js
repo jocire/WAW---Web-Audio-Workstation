@@ -1496,6 +1496,7 @@ function restoreSnapshot(snap) {
     if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
     redoStack.length = 0;
     updateUndoRedoButtons();
+    window.WAWStatusBar?.markDirty();
     // every undoable edit is also a candidate for sharing with collaborators
     window.WAWCollab?.notifyChange?.();
   }
@@ -7168,6 +7169,7 @@ function animateRecordingTransport() {
     }
     setActiveProject(item);
     renderProjectsLibrary();
+    window.WAWStatusBar?.markSaved();
     if (!silent) {
       statusEl.textContent = existingItem
         ? `Saved "${projectName}".`
@@ -7302,6 +7304,7 @@ function animateRecordingTransport() {
     activeClipId = null;
     selectedClipRef = null;
     updateUndoRedoButtons();
+    window.WAWStatusBar?.markSaved();
     if (payload.bpm && bpmInput) bpmInput.value = payload.bpm;
     if (payload.synthState && !tracks.some(t => t.synthPatch)) {
       const activeTrack = getActiveTrack();
@@ -7450,6 +7453,7 @@ function animateRecordingTransport() {
 
   function handleMIDIMessage(event) {
     if (window.WAWWorkspace && !window.WAWWorkspace.acceptMidi(event)) return;
+    window.WAWStatusBar?.midiActivity();
     const [status, data1, data2] = event.data;
     const cmd = status & 0xf0;
     const note = data1;
