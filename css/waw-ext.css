@@ -513,3 +513,33 @@ body[data-skin="ssl"] .sb-bar { background: #20251f; border-color: #3c433b; }
 .sc-body .sc-sep { opacity: 0.5; margin: 0 2px; }
 .sc-body .sc-note { opacity: 0.7; font-size: 11px; }
 .sb-bar [hidden] { display: none !important; }
+
+/* Track labels stay pinned at any zoom / scroll position: a sticky element only
+   sticks inside its parent, and rows were only as wide as the window while
+   their lanes were much wider, so labels scrolled away after ~1000 px.
+   Rows are now as wide as their lane. */
+#sequencerGrid .seq-track-row { width: max-content; min-width: 100%; }
+
+/* No horizontal scrollbar under the tracks: scroll sideways with the mouse
+   wheel / trackpad, the zoom bar or Fit. The vertical scrollbar stays (many
+   tracks); Shift+wheel also scrolls vertically. */
+/* Chromium / Safari: hide only the horizontal bar (setting scrollbar-width would
+   disable these rules). Firefox cannot hide one axis: there both are hidden and
+   Shift+wheel scrolls through the tracks. */
+#sequencerGrid::-webkit-scrollbar { width: 10px; height: 0; }
+#sequencerGrid::-webkit-scrollbar:horizontal { height: 0; display: none; }
+#sequencerGrid::-webkit-scrollbar-thumb { background: #2a3350; border-radius: 5px; }
+#sequencerGrid::-webkit-scrollbar-track { background: transparent; }
+@-moz-document url-prefix() { #sequencerGrid { scrollbar-width: none; } }
+
+/* Same for height: with many tracks the main area grew taller than the window
+   (and .app clips it), so lower tracks were unreachable. The arrange view now
+   fills the available height and scrolls internally. */
+.app > main, #mainArea { min-height: 0; }
+#sequencerView.visible { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+#sequencerView > #seqLoopBarCanvas { flex: none; }
+#sequencerView > #sequencerGrid { flex: 1 1 auto; min-height: 0; }
+/* every main view (mixer, editor, projects) fits the window and scrolls inside */
+#mainArea > .main-view.visible { min-height: 0; flex: 1 1 auto; }
+#mixerView.visible { display: flex; flex-direction: column; }
+#mixerView > .mixer-strips { flex: 1 1 auto; min-height: 0; height: auto; }
