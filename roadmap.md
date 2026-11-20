@@ -120,15 +120,26 @@ WAV export, so what you hear is what you export.
 ### Collaboration (v1)
 - Serverless WebRTC rooms via [Trystero](https://github.com/dmotz/trystero) over public
   Nostr relays (handshakes encrypted with the room code). Link format `…#room=<code>`.
-- Full-project sync on every edit (Lamport version, highest wins), on-demand transfer of
-  missing audio samples, presence (who is on which track/view), text chat, camera/mic
+- Project sync merges per part instead of per project: each track's settings, mix,
+  instrument and content (clips/notes) and the song's mixer buses, tempo map, track order,
+  loop and key are separate last-writer-wins units with their own Lamport versions, applied
+  in place. One person can record while others mix or edit instruments (even on the same
+  track); tracks added / deleted by different people at the same time both survive.
+  Arming, input monitoring and audio inputs are per person and never synced.
+- "Record together" (band mode): when one person records, everyone who opted in records
+  their own armed tracks from the same song position and stops with them; each take is
+  aligned to the song as that person heard it. On-demand transfer of missing audio samples, presence (who is on which track/view), text chat, camera/mic
   video tiles, optional "follow others' play/stop". A joiner's previous project is backed
   up to the local library before the session state is adopted.
 
 ## Known limitations
 
-- **Collab conflict handling is last-writer-wins on the whole project.** Two people
-  editing at the same moment can overwrite each other's change (the later one wins).
+- **Collab conflicts are resolved per part.** Two people changing the *same* part at the
+  same moment (e.g. both editing clips on one track, or both moving one fader) still
+  resolve last-writer-wins for that part.
+- **Band mode is not real-time jamming:** internet latency (typically 50–300 ms) is too high
+  to hear each other in time while playing; everyone plays against their own playback and
+  the takes line up on the timeline.
 - **Collab is best-effort:** depends on public relays and on WebRTC NAT traversal
   (no TURN server), so some corporate networks will not connect. No authentication —
   anyone with the link can join and edit. Suitable for small rooms (≈2–6 people).
@@ -150,10 +161,9 @@ WAV export, so what you hear is what you export.
 ## Next
 
 ### Near term
-1. **Collab v2 — CRDT document model.** Move project state to a CRDT
-   (e.g. [Yjs](https://yjs.dev) over the existing Trystero transport) so concurrent edits
-   merge per track/clip/parameter instead of whole-project last-writer-wins. Add per-object
-   soft locks ("Bob is editing Clip 3") and remote cursors in the piano roll.
+1. **Collab v3 — finer merges.** Per-clip / per-parameter units (or a CRDT such as
+   [Yjs](https://yjs.dev)) so concurrent edits on the same track merge too; soft locks
+   ("Bob is editing Clip 3") and remote cursors in the piano roll.
 2. **TURN fallback** for networks where peer-to-peer fails (configurable ICE servers).
 3. Tempo ramps and warp markers (elastic audio inside a clip).
 4. Bus/master automation; automation for instrument (synth/drum/sampler) parameters.

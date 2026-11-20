@@ -4446,6 +4446,9 @@ if (trackType === "midi" && targetTrack) {
 
   recordingLoopLen = 0;
   recordingBaseSec = 0;
+  // share the finished take with collaborators (audio takes notify when saved)
+  window.WAWCollab?.notifyChange?.();
+  window.WAWStatusBar?.markDirty?.();
 }
 
   function getScaleDegreeInfo(midiNote, tonic, pattern) {
