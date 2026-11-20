@@ -150,7 +150,11 @@
   }
 
   /** region: [from, to] as fractions of the canvas width; keep: draw over the existing canvas */
-  function drawWaveform(canvas, id, { start = 0, end = null, color = "rgba(255,255,255,0.75)", bg = null, gain = 1, region = null, keep = false } = {}) {
+  /**
+   * autoZoom: scale quiet audio up for display only (up to 16x, never down), so a
+   * low-level take is still readable; the audio itself is unchanged.
+   */
+  function drawWaveform(canvas, id, { start = 0, end = null, color = "rgba(255,255,255,0.75)", bg = null, gain = 1, region = null, keep = false, autoZoom = false } = {}) {
     if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth || canvas.parentElement?.clientWidth || 1;
@@ -171,6 +175,11 @@
     const mid = h / 2;
     ctx.fillStyle = color;
     const cols = pk.length / 2;
+    if (autoZoom) {
+      let m = 0;
+      for (let i = 0; i < pk.length; i++) m = Math.max(m, Math.abs(pk[i] * gain));
+      if (m > 1e-5) gain *= Math.min(16, Math.max(1, 0.9 / m));
+    }
     for (let x = 0; x < cols; x++) {
       const mn = Math.max(-1, pk[x * 2] * gain), mx = Math.min(1, pk[x * 2 + 1] * gain);
       const y1 = mid - mx * mid, y2 = mid - mn * mid;
