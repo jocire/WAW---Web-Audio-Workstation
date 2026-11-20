@@ -189,15 +189,18 @@
     if (op === "crop") out = cloneRegion(buf, s0, s1);
     else {
       out = cloneRegion(buf, 0, buf.length);
+      // normalize: one gain for all channels, measured before any channel is
+      // scaled (otherwise the stereo balance changes)
+      let normGain = 1;
+      if (op === "normalize") {
+        let peak = 0;
+        for (let ch = 0; ch < out.numberOfChannels; ch++) { const dd = out.getChannelData(ch); for (let i = s0; i < s1; i++) peak = Math.max(peak, Math.abs(dd[i])); }
+        normGain = peak > 0 ? Math.pow(10, (opts.targetDb ?? -0.3) / 20) / peak : 1;
+      }
       for (let c = 0; c < out.numberOfChannels; c++) {
         const d = out.getChannelData(c);
         if (op === "reverse") d.subarray(s0, s1).reverse();
-        else if (op === "normalize") {
-          let peak = 0;
-          for (let ch = 0; ch < out.numberOfChannels; ch++) { const dd = out.getChannelData(ch); for (let i = s0; i < s1; i++) peak = Math.max(peak, Math.abs(dd[i])); }
-          const g = peak > 0 ? Math.pow(10, (opts.targetDb ?? -0.3) / 20) / peak : 1;
-          for (let i = s0; i < s1; i++) d[i] *= g;
-        } else if (op === "fadeIn") { const n = s1 - s0; for (let i = 0; i < n; i++) d[s0 + i] *= i / n; }
+        else if (op === "normalize") { for (let i = s0; i < s1; i++) d[i] *= normGain; } else if (op === "fadeIn") { const n = s1 - s0; for (let i = 0; i < n; i++) d[s0 + i] *= i / n; }
         else if (op === "fadeOut") { const n = s1 - s0; for (let i = 0; i < n; i++) d[s0 + i] *= 1 - i / n; }
         else if (op === "silence") d.fill(0, s0, s1);
         else if (op === "gain") { const g = Math.pow(10, (opts.db ?? 0) / 20); for (let i = s0; i < s1; i++) d[i] *= g; }
@@ -225,7 +228,7 @@
       if (energies[k] > avg * sensitivity * 3 && energies[k] > 1e-5 && (!onsets.length || t - onsets[onsets.length - 1] > 0.08)) onsets.push(t);
     }
     if (!onsets.length || onsets[0] > 0.02) onsets.unshift(0);
-    // keep the strongest maxSlices onsets
+    // first maxSlices onsets in time order
     return onsets.slice(0, maxSlices);
   }
 

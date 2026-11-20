@@ -36,30 +36,53 @@
     return devs.filter(d => d.kind === "audioinput");
   }
 
+  /** raw (unprocessed) input stream; falls back to the default device when the
+   *  saved device id is stale (ids change after permission resets / replugging) */
+  async function getInputStream(deviceId) {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("this browser has no microphone access (needs HTTPS or localhost)");
+    const constraints = (id) => ({
+      audio: {
+        deviceId: id ? { exact: id } : undefined,
+        echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+        channelCount: { ideal: 2 }, latency: { ideal: 0 }
+      }, video: false
+    });
+    try {
+      return await navigator.mediaDevices.getUserMedia(constraints(deviceId));
+    } catch (err) {
+      if (deviceId && (err.name === "OverconstrainedError" || err.name === "NotFoundError" || err.name === "NotReadableError")) {
+        console.warn("saved input device unavailable, using the default input", err);
+        saveSetting(LS_DEVICE, "");
+        statusEl.textContent = "Selected input not found, using the default input.";
+        return navigator.mediaDevices.getUserMedia(constraints(""));
+      }
+      throw err;
+    }
+  }
+
   async function openInput() {
     const ctx = ensureAudioContext();
     const { deviceId, channels } = settings();
     if (input.stream && input.deviceId === deviceId && input.ctx === ctx) return input;
     closeInput();
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        deviceId: deviceId ? { exact: deviceId } : undefined,
-        echoCancellation: false, noiseSuppression: false, autoGainControl: false,
-        channelCount: { ideal: 2 }, latency: { ideal: 0 }
-      }, video: false
-    });
+    const stream = await getInputStream(deviceId);
     input.ctx = ctx;
     input.stream = stream;
     input.deviceId = deviceId;
     input.source = ctx.createMediaStreamSource(stream);
     input.gain = ctx.createGain();
-    input.gain.gain.value = parseFloat(document.getElementById("inputGainSlider")?.value ?? 1) || 1;
+    const slider = parseFloat(document.getElementById("inputGainSlider")?.value);
+    input.gain.gain.value = Number.isFinite(slider) ? slider : 1;
     // channel routing: stereo, or mono from left/right (sent to both sides)
     input.splitter = ctx.createChannelSplitter(2);
     input.merger = ctx.createChannelMerger(2);
     input.source.connect(input.splitter);
-    if (channels === "left" || channels === "right") {
-      const ch = channels === "left" ? 0 : 1;
+    // most USB / headset mics deliver ONE channel: in "stereo" mode that ended up
+    // on the left side only, so treat a mono device as mono-to-both
+    const devChannels = stream.getAudioTracks()[0]?.getSettings?.().channelCount || 2;
+    input.deviceChannels = devChannels;
+    if (channels === "left" || channels === "right" || devChannels < 2) {
+      const ch = channels === "right" && devChannels >= 2 ? 1 : 0;
       input.splitter.connect(input.merger, ch, 0);
       input.splitter.connect(input.merger, ch, 1);
     } else {
@@ -80,7 +103,15 @@
     input.monitorTaps.clear();
     try { input.source?.disconnect(); input.gain?.disconnect(); } catch (e) {}
     input.stream?.getTracks().forEach(t => t.stop());
-    input.stream = null; input.source = null;
+    input.stream = null; input.source = null; input.gain = null; input.analyser = null;
+    input.splitter = null; input.merger = null;
+  }
+
+  /** the mixer rebuilt its graph: reconnect monitoring taps to the new channel strips */
+  function resetMonitoring() {
+    input.monitorTaps.forEach(g => { try { g.disconnect(); } catch (e) {} });
+    input.monitorTaps.clear();
+    syncMonitoring();
   }
 
   /** route live input into the channel strip of every monitoring audio track */
@@ -169,6 +200,7 @@
   // Recording into audio tracks (driven by the transport in app.js)
   // ---------------------------------------------------------------------------
   let takes = null; // { tracks:[...], capture, songStart, loopLen }
+  let pendingBegin = null; // capture still starting (permission prompt, worklet load)
 
   function recordTargets() {
     const armed = tracks.filter(t => t.type === "audio" && t.armed);
@@ -180,21 +212,28 @@
   async function beginTrackRecording({ recordingStartTime, recordingBaseSec, recordingLoopLen }) {
     const targets = recordTargets();
     if (!targets.length) return false;
-    try {
-      const capture = await startCapture();
-      takes = { tracks: targets, capture, recordingStartTime, recordingBaseSec, recordingLoopLen };
-      statusEl.textContent = `Recording audio on ${targets.map(t => t.name).join(", ")}…`;
-      return true;
-    } catch (err) {
-      statusEl.textContent = "Audio recording failed: " + err.message;
-      takes = null;
-      return false;
-    }
+    const p = (async () => {
+      try {
+        const capture = await startCapture();
+        takes = { tracks: targets, capture, recordingStartTime, recordingBaseSec, recordingLoopLen };
+        statusEl.textContent = `Recording audio on ${targets.map(t => t.name).join(", ")}…`;
+        return true;
+      } catch (err) {
+        statusEl.textContent = "Audio recording failed: " + err.message;
+        takes = null;
+        return false;
+      }
+    })();
+    pendingBegin = p;
+    try { return await p; } finally { if (pendingBegin === p) pendingBegin = null; }
   }
 
-  function isRecordingAudio() { return !!takes; }
+  function isRecordingAudio() { return !!takes || !!pendingBegin; }
 
   async function endTrackRecording() {
+    // the transport may stop before the input finished opening: wait for it so
+    // the capture is stopped instead of running on forever
+    if (pendingBegin) await pendingBegin;
     if (!takes) return;
     const t = takes; takes = null;
     const startedAt = t.capture.startedAt ?? t.recordingStartTime;
@@ -204,20 +243,31 @@
     // latency compensation: input + output latency reported by the browser + user offset
     const autoLatency = (ctx.baseLatency || 0) + (ctx.outputLatency || 0);
     const latency = autoLatency + settings().latency / 1000;
+    // song position of the first captured sample (before any loop wrap)
     let songStart = t.recordingBaseSec + (startedAt - t.recordingStartTime) - latency;
-    let offset = 0;
-    if (songStart < 0) { offset = -songStart; songStart = 0; }
-    let clipLen = buf.duration - offset;
-    if (t.recordingLoopLen > 0) {
-      // cycle recording: keep the last complete pass through the loop
-      const passes = Math.floor((buf.duration - offset) / t.recordingLoopLen);
-      if (passes >= 1) {
-        offset += (passes - 1) * t.recordingLoopLen;
-        clipLen = t.recordingLoopLen;
+    let offset = 0, clipLen = 0, placed = false;
+    const L = t.recordingLoopLen;
+    if (L > 0) {
+      // cycle recording: keep the last complete pass through the loop.
+      // Pass k starts at buffer time first + k*L (first = loop start of pass 0).
+      const first = t.recordingBaseSec - songStart;
+      const kMin = Math.ceil(-first / L - 1e-9);
+      const kMax = Math.floor((buf.duration - first) / L + 1e-9) - 1;
+      if (kMax >= kMin) {
+        offset = first + kMax * L;
+        clipLen = L;
         songStart = t.recordingBaseSec;
+        placed = true;
       }
     }
-    pushHistory();
+    if (!placed) {
+      if (songStart < 0) { offset = -songStart; songStart = 0; }
+      clipLen = buf.duration - offset;
+      // an incomplete cycle pass must not run past the loop end
+      if (L > 0) clipLen = Math.min(clipLen, Math.max(0.01, t.recordingBaseSec + L - songStart));
+    }
+    if (clipLen <= 0.005) { statusEl.textContent = "No audio captured."; return; }
+    // the undo snapshot was taken when recording started, so one undo removes the whole take
     const id = await S().put(buf, `Audio ${new Date().toLocaleTimeString()}`);
     t.tracks.forEach(track => {
       addAudioClip(track, id, songStart, clipLen, offset, `Take ${(track.clips?.length || 0) + 1}`);
@@ -336,9 +386,9 @@
     if (!track || track.type !== "audio") {
       track = createTrack(null, { type: "audio" });
       track.name = `Audio ${tracks.filter(t => t.type === "audio").length + 1}`;
+      pushHistory();
       tracks.push(track);
-    }
-    pushHistory();
+    } else pushHistory();
     let pos = Math.max(0, atSec);
     for (const f of files) {
       try {
@@ -359,10 +409,20 @@
   // Audio clip editor (gain, fades, destructive tools)
   // ---------------------------------------------------------------------------
   let editorModal = null;
+  let editorRef = null; // { trackId, clipId, clip }
+  /** after undo/redo or a collaborator's change the clip object is replaced: re-bind or close */
+  function refreshEditor() {
+    if (!editorRef || !editorModal?.classList.contains("visible")) return;
+    const ti = tracks.findIndex(t => t.id === editorRef.trackId);
+    const clip = tracks[ti]?.clips?.find(c => c.id === editorRef.clipId);
+    if (!clip?.audio) { editorModal.classList.remove("visible"); editorRef = null; return; }
+    if (clip !== editorRef.clip) openClipEditor(ti, editorRef.clipId);
+  }
   function openClipEditor(trackIndex, clipId) {
     const track = tracks[trackIndex];
     const clip = track?.clips?.find(c => c.id === clipId);
     if (!clip?.audio) return;
+    editorRef = { trackId: track.id, clipId, clip };
     if (!editorModal) {
       editorModal = document.createElement("div");
       editorModal.className = "modal-backdrop";
@@ -472,9 +532,9 @@
   document.addEventListener("DOMContentLoaded", buildInputPanel);
 
   window.WAWAudio = {
-    listInputs, openInput, closeInput, setMonitor, syncMonitoring, startCapture,
+    listInputs, openInput, closeInput, getInputStream, setMonitor, syncMonitoring, startCapture,
     beginTrackRecording, endTrackRecording, isRecordingAudio, recordTargets,
     addAudioClip, collectAudioEvents, scheduleAudioEvent, trimAudioClip, drawClipWave,
-    importFilesToTrack, openClipEditor, sampleDuration
+    importFilesToTrack, openClipEditor, sampleDuration, resetMonitoring, refreshEditor
   };
 })();

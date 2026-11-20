@@ -224,7 +224,17 @@
     state.peers.clear();
     // creator owns version 1; a joiner starts at 0 so the room's state wins
     if (isNew) { state.version = Math.max(1, state.version + 1); state.versionBy = state.selfId; state.adoptedRoom = true; }
-    else { state.version = 0; state.versionBy = ""; state.adoptedRoom = false; }
+    else {
+      state.version = 0; state.versionBy = ""; state.adoptedRoom = false;
+      // nobody sent a project (empty room, or everyone else left): own the session
+      clearTimeout(state.adoptTimer);
+      state.adoptTimer = setTimeout(() => {
+        if (!state.room || state.adoptedRoom) return;
+        state.adoptedRoom = true;
+        state.version = 1; state.versionBy = state.selfId;
+        if (state.peers.size) sendProject();
+      }, 10000);
+    }
     history.replaceState(null, "", `#room=${roomId}`);
 
     const A = (name) => state.room.makeAction(name);
@@ -278,8 +288,12 @@
       } catch (e) { console.warn("sample receive failed", e); }
     };
     state.actions.transport.onMessage = (data) => {
-      if (!state.followTransport) return;
+      if (!state.followTransport || isRecording) return;
+      // remember the remote state so our transport watcher does not echo it back
+      // (the echo restarted playback on the sender)
+      state.remoteTransport = !!data?.playing;
       if (data?.playing) {
+        if (isPlaying) return;
         lastPlayheadSec = clamp(Number(data.pos) || 0, 0, 36000);
         playheadWasManuallySet = true;
         playNotes(getAllNotesMixdown());
@@ -294,6 +308,7 @@
 
   async function leave() {
     if (!state.room) return;
+    clearTimeout(state.adoptTimer);
     try { await state.room.leave(); } catch (e) {}
     state.room = null;
     state.peers.clear();
@@ -338,7 +353,9 @@
 
   let changeTimer = null;
   function notifyChange() {
-    if (!state.room || state.applyingRemote) return;
+    // a joiner must not broadcast before it has received the room's project,
+    // otherwise its local project can win and overwrite everybody's work
+    if (!state.room || state.applyingRemote || !state.adoptedRoom) return;
     clearTimeout(changeTimer);
     changeTimer = setTimeout(() => {
       const payload = projectPayload();
@@ -411,6 +428,7 @@
       if (typeof payload.loopEnabled === "boolean") { loopEnabled = payload.loopEnabled; loopBtn?.classList.toggle("active", loopEnabled); }
       state.lastSentSig = JSON.stringify(projectPayload());
       renderSidebarTracks(); renderSequencer(); window.renderMixer();
+      window.WAWSampler?.refreshIfStale?.(); window.WAWAudio?.refreshEditor?.();
       if (currentView === "editor") { drawPianoRoll(lastPlayheadSec); drawVelocityLane(); }
     } catch (e) {
       console.error("remote project apply failed", e);
@@ -430,7 +448,9 @@
       if (!state.room) return;
       if (isPlaying !== wasPlaying) {
         wasPlaying = isPlaying;
-        state.actions.transport.send({ playing: isPlaying, pos: lastPlayheadSec || 0 });
+        const echo = state.remoteTransport === isPlaying;
+        state.remoteTransport = null;
+        if (!echo) state.actions.transport.send({ playing: isPlaying, pos: lastPlayheadSec || 0 });
       }
     }, 150);
     let lastPresence = "";

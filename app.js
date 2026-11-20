@@ -1448,6 +1448,10 @@ function restoreSnapshot(snap) {
     renderSidebarTracks();
     renderSequencer();
     renderMixer();
+    // open editors hold references to the replaced track/clip objects
+    window.WAWSampler?.refreshIfStale?.();
+    window.WAWAudio?.refreshEditor?.();
+    window.WAWAudio?.syncMonitoring?.();
     updateUndoRedoButtons();
     restartPlaybackFromCurrentPosition();
   }
@@ -3737,14 +3741,15 @@ function ensureAudioContext() {
       ensureAudioContext();
       sampleRate = audioCtx.sampleRate;
 
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false
-        },
-        video: false
-      });
+      // use the input chosen in the Audio Input panel (was always the default device)
+      let savedDevice = "";
+      try { savedDevice = localStorage.getItem("waw.inputDevice") || ""; } catch (e) {}
+      micStream = window.WAWAudio?.getInputStream
+        ? await window.WAWAudio.getInputStream(savedDevice)
+        : await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+            video: false
+          });
 
       const source = audioCtx.createMediaStreamSource(micStream);
 
