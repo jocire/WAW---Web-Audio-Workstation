@@ -23,7 +23,7 @@
   function ensureWorklets(ctx) {
     if (!ctx?.audioWorklet) return Promise.resolve(false);
     if (!workletPromises.has(ctx)) {
-      const p = ctx.audioWorklet.addModule("js/worklets.js?v=4ad2a80fb0")
+      const p = ctx.audioWorklet.addModule("js/worklets.js?v=6fdb494420")
         .then(() => { ctx.__wawWorklets = true; return true; })
         .catch(err => { console.warn("AudioWorklet unavailable:", err); return false; });
       workletPromises.set(ctx, p);

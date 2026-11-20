@@ -523,14 +523,11 @@ body[data-skin="ssl"] .sb-bar { background: #20251f; border-color: #3c433b; }
 /* No horizontal scrollbar under the tracks: scroll sideways with the mouse
    wheel / trackpad, the zoom bar or Fit. The vertical scrollbar stays (many
    tracks); Shift+wheel also scrolls vertically. */
-/* Chromium / Safari: hide only the horizontal bar (setting scrollbar-width would
-   disable these rules). Firefox cannot hide one axis: there both are hidden and
-   Shift+wheel scrolls through the tracks. */
-#sequencerGrid::-webkit-scrollbar { width: 10px; height: 0; }
-#sequencerGrid::-webkit-scrollbar:horizontal { height: 0; display: none; }
-#sequencerGrid::-webkit-scrollbar-thumb { background: #2a3350; border-radius: 5px; }
-#sequencerGrid::-webkit-scrollbar-track { background: transparent; }
-@-moz-document url-prefix() { #sequencerGrid { scrollbar-width: none; } }
+/* No horizontal scrollbar at all (scrollbar styling is ignored by some Chrome
+   setups/themes): the grid does not scroll sideways natively; the app scrolls
+   it (mouse wheel, trackpad, zoom bar, Fit, playhead follow). The vertical
+   scrollbar stays for long track lists; Shift+wheel also scrolls vertically. */
+#sequencerView > #sequencerGrid { overflow-x: hidden !important; overflow-y: auto; }
 
 /* Same for height: with many tracks the main area grew taller than the window
    (and .app clips it), so lower tracks were unreachable. The arrange view now

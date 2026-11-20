@@ -4098,7 +4098,10 @@ function ensureAudioContext() {
   liveRecordingClip = null;
   liveRecordingClipEl = null;
 
-  if (trackType === "midi" && activeTrack && !(currentView === "editor" && activeClipId != null)) {
+  const armedMidi = tracks.filter(t => t.type !== "audio" && t.armed);
+  if (armedMidi.length) multiMidiRec.start(armedMidi, recordingBaseSec);
+
+  if (!armedMidi.length && trackType === "midi" && activeTrack && !(currentView === "editor" && activeClipId != null)) {
     const newClip = new Clip({
       startSec: clipRecordStartSec,
       endSec: clipRecordStartSec + 0.1,
@@ -4150,7 +4153,92 @@ function ensureAudioContext() {
   if (loopBarCanvas) drawAllLoopBars(lastPlayheadSec);
 }
 
+// ---------------------------------------------------------------------------
+// Multi-track MIDI recording: every armed MIDI track records its own clip
+// (with its own instrument) from the same live input.
+// ---------------------------------------------------------------------------
+const multiMidiRec = {
+  active: false,
+  items: [],   // [{ track, clip, notes: [{startSec,endSec,midiNote,velocity}], held: Map(note -> {start, vel}) }]
+  songNow() {
+    const t = Math.max(0, audioCtx.currentTime - recordingStartTime);
+    return recordingLoopLen > 0 ? recordingBaseSec + (t % recordingLoopLen) : recordingBaseSec + t;
+  },
+  start(targets, startSec) {
+    this.items = targets.map(track => {
+      const clip = new Clip({ startSec, endSec: startSec + 0.1, notesSnapshot: [] });
+      clip.name = `Clip ${(track.clips?.length || 0) + 1}`;
+      clip.isRecordingLive = true;
+      track.clips = track.clips || [];
+      track.clips.push(clip);
+      return { track, clip, notes: [], held: new Map() };
+    });
+    this.active = true;
+    renderSequencer();
+  },
+  noteOn(note, velocity) {
+    const t = this.songNow();
+    this.items.forEach(it => { if (!it.held.has(note)) it.held.set(note, { start: t, vel: velocity || 100 }); });
+  },
+  noteOff(note, at = null) {
+    const t = at ?? this.songNow();
+    this.items.forEach(it => {
+      const h = it.held.get(note);
+      if (!h) return;
+      it.held.delete(note);
+      it.notes.push({ startSec: h.start, endSec: Math.max(t, h.start + 0.05), midiNote: note, velocity: h.vel });
+    });
+  },
+  /** grow the live clips and redraw their thumbnails */
+  tick(songPos) {
+    const pxPerSec = getSeqPxPerSec();
+    this.items.forEach(it => {
+      const c = it.clip;
+      c.endSec = Math.max(c.startSec + 0.1, songPos);
+      const len = c.endSec - c.startSec;
+      const held = [...it.held.entries()].map(([n, h]) => ({ startSec: h.start, endSec: Math.max(songPos, h.start + 0.05), midiNote: n, velocity: h.vel }));
+      c.notesSnapshot = [...it.notes, ...held]
+        .map(n => ({ ...n, startSec: Math.max(0, n.startSec - c.startSec), endSec: Math.min(len, n.endSec - c.startSec) }))
+        .filter(n => n.endSec > n.startSec);
+      const el = document.querySelector(`.seq-clip[data-clip-id="${c.id}"]`);
+      if (el) {
+        el.classList.add("recording");
+        el.style.width = Math.max(8, len * pxPerSec) + "px";
+        const thumb = el.querySelector(".clip-thumb");
+        if (thumb) drawClipPreview(thumb, c);
+      }
+    });
+  },
+  stop(songEnd) {
+    [...new Set(this.items.flatMap(it => [...it.held.keys()]))].forEach(n => this.noteOff(n, songEnd));
+    this.items.forEach(({ track, clip, notes: recorded }) => {
+      clip.isRecordingLive = false;
+      if (!recorded.length) {
+        track.clips = (track.clips || []).filter(c => c !== clip);
+        return;
+      }
+      // end on a bar line after the last note (follows tempo + meter changes)
+      const rawEnd = Math.max(clip.startSec + 0.25, ...recorded.map(n => n.endSec));
+      const T = window.WAWTempo;
+      const endBar = T ? T.position(rawEnd - 1e-6).bar + 1 : null;
+      clip.endSec = T ? Math.max(T.barToSec(endBar), T.barToSec(T.position(clip.startSec).bar + 1)) : rawEnd;
+      const len = clip.endSec - clip.startSec;
+      clip.notesSnapshot = recorded.map(n => {
+        const deg = getScaleDegreeInfo(n.midiNote, tonicSemitone, scalePattern);
+        return new NoteEvent(Math.max(0, n.startSec - clip.startSec), Math.min(len, n.endSec - clip.startSec), n.midiNote, n.velocity, deg.degree, deg.octave);
+      }).filter(n => n.endSec > n.startSec);
+      syncTrackNotesFromClip(track, clip);
+    });
+    const made = this.items.filter(it => it.notes.length).length;
+    this.items = [];
+    this.active = false;
+    renderSequencer();
+    this.summary = made ? `Recorded MIDI on ${made} armed track(s).` : "No MIDI notes recorded on the armed tracks.";
+  }
+};
+
 function updateLiveRecordingClip(songPos) {
+  if (multiMidiRec.active) multiMidiRec.tick(songPos);
   if (!liveRecordingClip) return;
 
   const targetTrack = tracks[clipRecordTrackIndex];
@@ -4248,6 +4336,9 @@ function stopRecording() {
     currentNote = null;
   }
 
+  // armed MIDI tracks: finish their clips
+  if (multiMidiRec.active) multiMidiRec.stop(songEndSec);
+
   // Flush any held MIDI notes
   if (midiActiveNotes.size) {
     midiActiveNotes.forEach((info, midiNote) => {
@@ -4329,7 +4420,8 @@ if (trackType === "midi" && targetTrack) {
     loopEndSec   = snappedEnd > 0 ? snappedEnd : totalDur;
   }
 
-  statusEl.textContent = `Recording stopped. Captured ${notes.length} note(s).`;
+  statusEl.textContent = multiMidiRec.summary || `Recording stopped. Captured ${notes.length} note(s).`;
+  multiMidiRec.summary = null;
 
   selectedNotes.clear();
   lastSelectedNoteIndex = -1;
@@ -7543,7 +7635,7 @@ function animateRecordingTransport() {
       if (activeInst === "808") { trigger808PadNote(padNote, e.shiftKey ? 127 : 112); return; }
       // sampler: hold the key for gate / loop pads
       if (activeComputerKeys.has(e.code)) return;
-      activeComputerKeys.set(e.code, { note: padNote, trackId: getActiveTrack()?.id || null });
+      activeComputerKeys.set(e.code, { note: padNote, trackId: undefined });
       midiNoteOn(padNote, e.shiftKey ? 127 : 110);
       return;
     }
@@ -7569,7 +7661,7 @@ function animateRecordingTransport() {
     e.preventDefault();
     activeComputerKeys.set(e.code, {
       note,
-      trackId: getActiveTrack()?.id || null
+      trackId: undefined // midiNoteOff releases every track the note went to
     });
     midiNoteOn(note, 105);
   });
@@ -7584,15 +7676,35 @@ function animateRecordingTransport() {
 
   window.addEventListener("blur", stopAllComputerKeyboardNotes);
 
+  /**
+   * Tracks that receive live MIDI / computer-keyboard input: every armed MIDI
+   * track (each plays its own instrument instance), or the selected track when
+   * no MIDI track is armed.
+   */
+  function liveInputTracks() {
+    const armed = tracks.filter(t => t.type !== "audio" && t.armed);
+    if (armed.length) return armed;
+    const t = getActiveTrack();
+    return t ? [t] : [];
+  }
+
   function midiNoteOn(note, velocity) {
-    const track = getActiveTrack();
-    const trackId = track?.id || null;
+    const targets = liveInputTracks();
+    const trackIds = targets.map(t => t.id);
     activeMidiKeys.add(note);
-    activePreviewNotes.set(note, trackId);
+    activePreviewNotes.set(note, trackIds);
     updateChordFromActiveKeys();
 
-    // Preview sound
-    previewNoteOn(note, velocity, track);
+    // Preview sound on every target track
+    targets.forEach(t => previewNoteOn(note, velocity, t));
+
+    // armed MIDI tracks record through the multi-track recorder
+    if (isRecording && audioCtx && multiMidiRec.active) {
+      multiMidiRec.noteOn(note, velocity);
+      drawPianoRoll();
+      drawVelocityLane();
+      return;
+    }
 
     // If we are recording, add / update a MIDI note in the piano roll.
     if (isRecording && audioCtx) {
@@ -7621,7 +7733,14 @@ function animateRecordingTransport() {
   activeMidiKeys.delete(note);
   activePreviewNotes.delete(note);
   updateChordFromActiveKeys();
-  previewNoteOff(note, trackId);
+  (Array.isArray(trackId) ? trackId : [trackId]).forEach(id => previewNoteOff(note, id));
+
+  if (isRecording && audioCtx && multiMidiRec.active) {
+    multiMidiRec.noteOff(note);
+    drawPianoRoll();
+    drawVelocityLane();
+    return;
+  }
 
   // If recording, finalize this MIDI note into the piano roll
   if (isRecording && audioCtx) {

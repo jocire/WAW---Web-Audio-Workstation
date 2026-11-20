@@ -25,7 +25,7 @@ class WawGateProcessor extends AudioWorkletProcessor {
   process(inputs, outputs, params) {
     const input = inputs[0];
     const output = outputs[0];
-    if (!input || !input.length) return true;
+    if (!input || !input.length) return false; // disconnected: let the browser stop calling us
 
     const thrLin = Math.pow(10, params.threshold[0] / 20);
     const closeLin = thrLin * 0.7; // ~3 dB hysteresis

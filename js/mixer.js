@@ -181,13 +181,16 @@
       this.lf.connect(this.lmf); this.lmf.connect(this.hmf); this.hmf.connect(this.hf); this.hf.connect(this.eqOut);
       // Dynamics section
       this.dynIn = ctx.createGain(); this.dynOut = ctx.createGain();
-      this.gate = FX.makeWorklet(ctx, "waw-gate", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+      // the gate (an AudioWorklet, i.e. JavaScript on the audio thread) is only
+      // created when it is switched on, and the dynamics section only gets
+      // signal while it is in use: with many tracks, always-running gates and
+      // compressors overloaded the audio thread (dropouts)
+      this.gate = null;
+      this.dynSig = "";
       this.comp = ctx.createDynamicsCompressor();
       this.makeup = ctx.createGain();
       this.dynBypass = ctx.createGain();
       this.dynWet = ctx.createGain();
-      if (this.gate) { this.dynIn.connect(this.gate); this.gate.connect(this.comp); }
-      else this.dynIn.connect(this.comp);
       this.comp.connect(this.makeup); this.makeup.connect(this.dynWet); this.dynWet.connect(this.dynOut);
       this.dynIn.connect(this.dynBypass); this.dynBypass.connect(this.dynOut);
       // inserts + output section
@@ -238,6 +241,7 @@
       set(this.hf.frequency, Math.min(s.hfFreq, nyq)); set(this.hf.gain, s.hfGain * eq);
       // dynamics
       const dynOn = !!(s.dynOn || s.gateOn);
+      this.wireDyn(dynOn, !!s.gateOn);
       set(this.dynWet.gain, dynOn ? 1 : 0, 0.005);
       set(this.dynBypass.gain, dynOn ? 0 : 1, 0.005);
       set(this.comp.threshold, s.dynOn ? s.compThresh : 0);
@@ -271,8 +275,22 @@
       });
     }
 
+    /** connect the dynamics chain only while it is used; create the gate on demand */
+    wireDyn(active, gateOn) {
+      const sig = (active ? 1 : 0) + ":" + (gateOn ? 1 : 0);
+      if (sig === this.dynSig) return;
+      this.dynSig = sig;
+      try { this.dynIn.disconnect(this.comp); } catch (e) {}
+      if (this.gate) { try { this.dynIn.disconnect(this.gate); } catch (e) {} try { this.gate.disconnect(); } catch (e) {} }
+      if (this.gate && !gateOn) this.gate = null; // let the browser retire the worklet
+      if (!active) return;
+      if (gateOn && !this.gate) this.gate = FX.makeWorklet(this.ctx, "waw-gate", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+      if (gateOn && this.gate) { this.dynIn.connect(this.gate); this.gate.connect(this.comp); }
+      else this.dynIn.connect(this.comp);
+    }
+
     reduction() {
-      const own = this.order !== null ? (this.comp.reduction || 0) : 0;
+      const own = this.order !== null && this.dynSig.startsWith("1") ? (this.comp.reduction || 0) : 0;
       return Math.min(own, this.inserts.reduction());
     }
 
