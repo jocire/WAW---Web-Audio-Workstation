@@ -29,6 +29,13 @@
 
   const KEY_LABEL_WIDTH = 42;
 
+  // Escape user-provided text (track/clip/project names) before inserting it via innerHTML.
+  function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, ch => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    })[ch]);
+  }
+
   function midiToNoteName(m) {
     if (m == null || isNaN(m)) return "";
     m = Math.round(m);
@@ -132,9 +139,18 @@ function renderSequencer() {
     row.className = "seq-track-row" + (ti === activeTrackIndex ? " active" : "");
     row.dataset.trackIndex = ti;
 
+    const kindLabel = t.type === "audio" ? "Audio" : (t.instrument === "808" ? "Drums" : t.instrument === "sampler" ? "Sampler" : "Synth");
+    row.classList.toggle("is-audio", t.type === "audio");
+    row.classList.toggle("is-muted", !!t.mute);
     row.innerHTML = `
       <div class="seq-row-label" style="border-left:4px solid ${t.color}">
-        ${t.name || `Track ${ti + 1}`}
+        <div class="seq-label-top"><span class="seq-label-name">${escapeHtml(t.name || `Track ${ti + 1}`)}</span><span class="seq-label-kind">${kindLabel}</span></div>
+        <div class="seq-label-btns">
+          <button type="button" class="tb-m ${t.mute ? "on" : ""}" data-tb="mute" title="Mute">M</button>
+          <button type="button" class="tb-s ${t.solo ? "on" : ""}" data-tb="solo" title="Solo">S</button>
+          <button type="button" class="tb-r ${t.armed ? "on" : ""}" data-tb="arm" title="Record arm">R</button>
+          ${t.type === "audio" ? `<button type="button" class="tb-i ${t.monitor ? "on" : ""}" data-tb="monitor" title="Input monitoring">I</button>` : ""}
+        </div>
       </div>
       <div class="seq-row-lane"></div>
     `;
@@ -145,9 +161,21 @@ function renderSequencer() {
 
     label?.addEventListener("click", (e) => {
       e.stopPropagation();
+      const tb = e.target.closest("[data-tb]")?.dataset.tb;
+      if (tb) { window.WAWWorkspace?.trackButton(t, tb); return; }
       setActiveTrack(ti, { silent: true });
       renderSequencer();
       renderMixer();
+    });
+    label?.addEventListener("dblclick", (e) => {
+      if (e.target.closest("[data-tb]")) return;
+      const v = prompt("Track name:", t.name);
+      if (v && v.trim()) { pushHistory(); t.name = v.trim(); renderSequencer(); renderSidebarTracks(); renderMixer(); }
+    });
+    label?.addEventListener("contextmenu", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      setActiveTrack(ti, { silent: true });
+      window.WAWWorkspace?.showTrackMenu(ti, e.clientX, e.clientY);
     });
 
     // Use pointerdown/pointerup with a movement threshold so dragging across
@@ -171,6 +199,7 @@ function renderSequencer() {
       if (Math.hypot(e.clientX - laneDownX, e.clientY - laneDownY) > 4) return;
 
       e.stopPropagation();
+      if (t.type === "audio") { setActiveTrack(ti, { silent: true }); renderSequencer(); return; }
 
       const rect = lane.getBoundingClientRect();
       const xPx = e.clientX - rect.left;
@@ -235,16 +264,18 @@ function renderSequencer() {
         <canvas class="clip-thumb"></canvas>
         <div class="handle left" data-handle="left"></div>
         <div class="handle right" data-handle="right"></div>
-        <div class="clip-title">${clip.name || "Clip"}</div>
+        <div class="clip-title">${escapeHtml(clip.name || "Clip")}</div>
       `;
 
       lane.appendChild(clipEl);
 
       // Wait one frame so CSS sizes resolve, then draw the thumbnail
       const thumb = clipEl.querySelector(".clip-thumb");
+      if (clip.audio) clipEl.classList.add("audio");
+      if (clip.muted) clipEl.classList.add("muted");
       requestAnimationFrame(() => {
         if (thumb && thumb.isConnected) {
-          drawClipThumbnail(thumb, clip);
+          drawClipPreview(thumb, clip);
         }
       });
     });
@@ -265,6 +296,7 @@ function renderSequencer() {
 
     drawSequencerRuler(lastPlayheadSec);
     drawAllLoopBars(lastPlayheadSec);
+    window.WAWCollab?.paintPresence?.();
   });
 }
 
@@ -423,7 +455,8 @@ function copyClip(trackIndex, clipId) {
   clipClipboard = {
     name: clip.name || "Clip",
     duration: Math.max(0.1, clip.endSec - clip.startSec),
-    notesSnapshot: getClipLocalNotes(clip).map(n => ({ ...n }))
+    notesSnapshot: getClipLocalNotes(clip).map(n => ({ ...n })),
+    audio: clip.audio ? { ...clip.audio } : null
   };
   statusEl.textContent = `Copied ${clip.name || "clip"}.`;
   return true;
@@ -438,6 +471,11 @@ function pasteClip(trackIndex, atSec = null) {
   if (!clipClipboard) return false;
   const track = tracks[trackIndex] || getActiveTrack();
   if (!track) return false;
+  // audio clips go on audio tracks, MIDI clips on instrument tracks
+  if (!!clipClipboard.audio !== (track.type === "audio")) {
+    statusEl.textContent = clipClipboard.audio ? "Paste audio clips onto an audio track." : "Paste MIDI clips onto an instrument track.";
+    return false;
+  }
 
   const duration = Math.max(0.1, clipClipboard.duration);
   const desiredStart = atSec != null && isFinite(atSec)
@@ -450,6 +488,7 @@ function pasteClip(trackIndex, atSec = null) {
     notesSnapshot: clipClipboard.notesSnapshot.map(n => ({ ...n }))
   });
   pasted.name = `${clipClipboard.name || "Clip"} Copy`;
+  if (clipClipboard.audio) pasted.audio = { ...clipClipboard.audio };
 
   pushHistory();
   track.clips = track.clips || [];
@@ -477,6 +516,7 @@ function duplicateClip(trackIndex, clipId) {
     notesSnapshot: getClipLocalNotes(clip).map(n => ({ ...n }))
   });
   duplicate.name = `${clip.name || "Clip"} Copy`;
+  if (clip.audio) duplicate.audio = { ...clip.audio };
 
   pushHistory();
   track.clips.push(duplicate);
@@ -590,7 +630,7 @@ function attachSequencerInteractions() {
     if (!clipEl) return;
 
     e.preventDefault();
-    clipEl.setPointerCapture(e.pointerId);
+    try { clipEl.setPointerCapture(e.pointerId); } catch (_) {}
 
     const ti = Number(clipEl.dataset.trackIndex);
     const clipId = clipEl.dataset.clipId;
@@ -613,6 +653,8 @@ function attachSequencerInteractions() {
     seqDrag.origStart = clip.startSec;
     seqDrag.origEnd = clip.endSec;
     seqDrag.origNotesSnapshot = (clip.notesSnapshot || []).map(n => ({ ...n }));
+    seqDrag.origOffset = clip.audio?.offset ?? 0;
+    beginHistoryGesture();
 
     // select + set active track
     setActiveTrack(ti, { silent: true });
@@ -652,7 +694,8 @@ function attachSequencerInteractions() {
       ns = snapSec(Math.max(0, ns));
       ns = Math.min(ns, clip.endSec - minLen);
       clip.startSec = ns;
-      trimClipToCurrentBounds(t, clip, seqDrag.origNotesSnapshot, seqDrag.origStart);
+      if (clip.audio) window.WAWAudio.trimAudioClip(clip, seqDrag.origStart, seqDrag.origEnd, seqDrag.origOffset);
+      else trimClipToCurrentBounds(t, clip, seqDrag.origNotesSnapshot, seqDrag.origStart);
     }
 
     if (seqDrag.mode === "resizeR") {
@@ -660,12 +703,34 @@ function attachSequencerInteractions() {
       ne = snapSec(ne);
       ne = Math.max(ne, clip.startSec + minLen);
       clip.endSec = ne;
-      trimClipToCurrentBounds(t, clip, seqDrag.origNotesSnapshot, seqDrag.origStart);
+      if (clip.audio) window.WAWAudio.trimAudioClip(clip, seqDrag.origStart, seqDrag.origEnd, seqDrag.origOffset);
+      else trimClipToCurrentBounds(t, clip, seqDrag.origNotesSnapshot, seqDrag.origStart);
     }
 
-    // extend song length naturally if needed
-    renderSequencer();
+    // Update only the dragged clip element instead of rebuilding every lane
+    // on each pointermove (which was very expensive with many clips/tracks).
+    updateClipElementGeometry(ti, clip, seqDrag.mode !== "move");
   });
+
+  function updateClipElementGeometry(ti, clip, redrawThumb) {
+    const pxPerSec = getSeqPxPerSec();
+    const clipEl = sequencerGrid.querySelector(
+      `.seq-clip[data-track-index="${ti}"][data-clip-id="${CSS.escape(clip.id)}"]`
+    );
+    const lane = clipEl?.parentElement;
+    const neededWidth = (clip.endSec + (60 / (parseFloat(bpmInput?.value) || 120)) * 8) * pxPerSec;
+    if (!clipEl || !lane || lane.offsetWidth < neededWidth) {
+      // lane must grow (or element is missing) -> full rebuild
+      renderSequencer();
+      return;
+    }
+    clipEl.style.left = (clip.startSec * pxPerSec) + "px";
+    clipEl.style.width = Math.max(8, (clip.endSec - clip.startSec) * pxPerSec) + "px";
+    if (redrawThumb) {
+      const thumb = clipEl.querySelector(".clip-thumb");
+      if (thumb) drawClipPreview(thumb, clip);
+    }
+  }
 
   function endDrag() {
     if (!seqDrag.active) return;
@@ -675,15 +740,28 @@ function attachSequencerInteractions() {
       Math.abs(clip.startSec - seqDrag.origStart) > 0.0001 ||
       Math.abs(clip.endSec - seqDrag.origEnd) > 0.0001
     );
-    if (clip && seqDrag.mode && seqDrag.mode !== "move") {
+    if (clip && !clip.audio && seqDrag.mode && seqDrag.mode !== "move") {
       trimClipToCurrentBounds(t, clip, seqDrag.origNotesSnapshot, seqDrag.origStart);
-      if (activeClipId === clip.id) syncEditorToClipBounds(clip);
     }
+    if (clip && !clip.audio && didChange && seqDrag.mode === "move") {
+      // Move the track's editor notes along with the clip; otherwise stale
+      // copies stayed at the old position and showed up as ghost notes.
+      const oldStart = seqDrag.origStart;
+      const oldEnd = seqDrag.origEnd;
+      t.notes = (t.notes || []).filter(n => n.endSec <= oldStart || n.startSec >= oldEnd);
+      if (tracks[activeTrackIndex] === t) notes = t.notes;
+      syncTrackNotesFromClip(t, clip);
+    }
+    if (clip && didChange && activeClipId === clip.id) syncEditorToClipBounds(clip);
     seqDrag.active = false;
     seqDrag.mode = null;
     seqDrag.origNotesSnapshot = [];
     if (didChange) {
+      commitHistoryGesture();
+      renderSequencer();
       restartPlaybackFromCurrentPosition();
+    } else {
+      cancelHistoryGesture();
     }
   }
 
@@ -706,6 +784,7 @@ function attachSequencerInteractions() {
     const ti = Number(clipEl.dataset.trackIndex);
     const clipId = clipEl.dataset.clipId;
     setActiveTrack(ti, { silent:true });
+    if (tracks[ti]?.clips?.find(c => c.id === clipId)?.audio) { window.WAWAudio.openClipEditor(ti, clipId); return; }
     openClipInEditor(clipId);
   });
 }
@@ -745,7 +824,7 @@ sequencerGrid?.addEventListener("wheel", (e) => {
     // keep mouse anchored
     const afterPxPerSec = getSeqPxPerSec();
     const afterX = beforeSec * afterPxPerSec;
-    sequencerGrid.scrollLeft = afterX - (mouseX - rect.left);
+    sequencerGrid.scrollLeft = afterX - (mouseX - rect.left - labelW);
 
   } else {
     // normal wheel = horizontal pan
@@ -795,6 +874,12 @@ function getClipLocalNotes(clip) {
     .filter(n => n.endSec > 0 && n.startSec < clipLen);
 }
 
+// audio clips show their waveform, MIDI clips a mini piano roll
+function drawClipPreview(canvas, clip) {
+  if (clip.audio) window.WAWAudio?.drawClipWave(canvas, clip);
+  else drawClipThumbnail(canvas, clip);
+}
+
 function drawClipThumbnail(canvas, clip) {
   if (!canvas) return;
 
@@ -830,7 +915,7 @@ function drawClipThumbnail(canvas, clip) {
 
     const y = h - ((n.midiNote - minNote + 1) / noteRange) * h;
 
-    const vel = (n.velocity ?? 0.8); // 0..1
+    const vel = Math.min(1, Math.max(0, (n.velocity ?? 100) / 127)); // MIDI 1..127 -> 0..1
     ctx.fillStyle = `rgba(255,255,255,${0.12 + vel * 0.6})`;
 
     ctx.fillRect(x, y, ww, rowH);
@@ -923,45 +1008,11 @@ function syncTrackNotesFromClip(track, clip) {
     if (seqRecordBtn) seqRecordBtn.disabled = false;
     if (seqStopBtn) seqStopBtn.disabled = true;
 
-    stopRecording(); // this fills notes on the recording track
-
-    // Build a clip from the just-recorded span.
-    const trackIndex = Math.min(Math.max(0, clipRecordTrackIndex), tracks.length - 1);
-    const t = tracks[trackIndex];
-    if (!t) return;
-    const recordedNotes = (t.notes || [])
-      .slice(clipRecordStartNoteCount)
-      .filter(n => n.endSec > clipRecordStartSec);
-
-    // infer end = current loopEndSec if first take, else max note end
-    const clipEnd = Math.max(
-      clipRecordStartSec + 0.25,
-      ...recordedNotes.map(n => n.endSec)
-    );
-
-    const newClip = new Clip({
-      startSec: clipRecordStartSec,
-      endSec: clipEnd,
-      notesSnapshot: [] // optional, see below
-    });
-
-    t.clips = t.clips || [];
-    t.clips.push(newClip);
-
-    const clipLen = Math.max(0.0001, newClip.endSec - newClip.startSec);
-    newClip.notesSnapshot = recordedNotes
-     .filter(n => n.endSec > newClip.startSec && n.startSec < newClip.endSec)
-     .map(n => ({
-       ...n,
-       startSec: Math.max(0, n.startSec - newClip.startSec),
-       endSec: Math.min(clipLen, n.endSec - newClip.startSec)
-     }))
-     .filter(n => n.endSec > n.startSec);
-
-    setActiveTrack(trackIndex, { silent: true });
-    setSelectedClip(trackIndex, newClip.id);
-    renderSequencer();
-  } 
+    // stopRecording() finalizes the live recording clip created by
+    // startRecordingCore(). Building another clip here produced a duplicate,
+    // overlapping clip containing the same notes.
+    stopRecording();
+  }
 
   function collectSequencerNotesInRange(rangeStart, rangeEnd, sourceTracks = tracks) {
   const out = [];
@@ -969,6 +1020,7 @@ function syncTrackNotesFromClip(track, clip) {
   sourceTracks.forEach(t => {
     (t.clips || []).forEach(clip => {
       if (clip.endSec <= rangeStart || clip.startSec >= rangeEnd) return;
+      if (clip.muted) return;
 
       getClipLocalNotes(clip).forEach(n => {
         const gn = { ...n };
@@ -1102,34 +1154,7 @@ function syncTrackNotesFromClip(track, clip) {
   // ---------- MIXER RENDERING ----------
   const mixerStrips = document.getElementById("mixerStrips");
 
-  function mixerDbLabel(volume) {
-    const v = Math.max(0, Math.min(1.2, volume ?? 1));
-    if (v <= 0.001) return "-inf";
-    const db = 20 * Math.log10(v);
-    return db > 0 ? `+${db.toFixed(1)}` : (db >= -0.05 ? "0.0" : db.toFixed(1));
-  }
-
-  function knobRotation(value, min, max) {
-    const norm = (value - min) / Math.max(0.0001, max - min);
-    return -135 + Math.max(0, Math.min(1, norm)) * 270;
-  }
-
-  function getMixerMeterLevel(track) {
-    if (track.mute) return 0;
-    const noteCount = (track.notes || []).length + (track.clips || []).reduce((sum, c) => sum + (c.notesSnapshot || []).length, 0);
-    const activity = Math.min(0.35, noteCount * 0.025);
-    return Math.max(0.04, Math.min(1, (track.volume ?? 1) * (0.58 + activity)));
-  }
-
-  function renderKnob(label, className, value, min, max) {
-    return `
-      <label class="ssl-knob-wrap">
-        <span>${label}</span>
-        <span class="ssl-knob" style="--rot:${knobRotation(value, min, max)}deg"></span>
-        <input class="${className}" type="range" min="${min}" max="${max}" step="0.01" value="${value}">
-      </label>
-    `;
-  }
+  // The channel strip / console UI lives in js/mixer.js (window.renderMixer).
 
   function render808PadPanel() {
     return `
@@ -1165,123 +1190,6 @@ function syncTrackNotesFromClip(track, clip) {
     attach808PadEvents(drum808ModalPads);
   }
 
-  function renderMixer() {
-    if (!mixerStrips) return;
-    ensureTracks();
-    mixerStrips.innerHTML = "";
-
-    tracks.forEach((t, i)=>{
-      t.sendA = t.sendA ?? (t.fx?.reverb ? 0.25 : 0);
-      t.sendB = t.sendB ?? (t.fx?.delay ? 0.18 : 0);
-      const level = getMixerMeterLevel(t);
-      const db = mixerDbLabel(t.volume);
-      const strip = document.createElement("div");
-      strip.className = "mixer-strip" + (i===activeTrackIndex ? " active": "");
-      strip.innerHTML = `
-        <div class="ssl-strip-top">
-          <div class="mix-channel-id">${String(i + 1).padStart(2, "0")}</div>
-          <div class="mix-title" title="${t.name}">${t.name}</div>
-        </div>
-
-        <div class="ssl-preamp">
-          <span>LINE</span>
-          <span>${t.instrument || "synth"}</span>
-        </div>
-
-        <div class="ssl-knob-bank">
-          ${renderKnob("HF", "mix-eq-high", t.eqHigh ?? 0, -1, 1)}
-          ${renderKnob("MF", "mix-eq-mid", t.eqMid ?? 0, -1, 1)}
-          ${renderKnob("LF", "mix-eq-low", t.eqLow ?? 0, -1, 1)}
-          ${renderKnob("REV", "mix-send-a", t.sendA, 0, 1)}
-          ${renderKnob("DLY", "mix-send-b", t.sendB, 0, 1)}
-          ${renderKnob("PAN", "mix-pan", t.pan ?? 0, -1, 1)}
-        </div>
-
-        <div class="ssl-buttons">
-          <button class="mix-mute ${t.mute?"active":""}" type="button">M</button>
-          <button class="mix-solo ${t.solo?"active":""}" type="button">S</button>
-          <button class="mix-width ${t.stereo===false?"active":""}" type="button">
-            ${t.stereo===false ? "MONO" : "ST"}
-          </button>
-        </div>
-
-        <div class="ssl-lower">
-          <div class="ssl-meter" aria-label="Track level">
-            <div class="ssl-meter-scale">
-              <span>0</span><span>-6</span><span>-18</span><span>-42</span>
-            </div>
-            <div class="ssl-meter-slot">
-              <span class="ssl-meter-fill" style="height:${Math.round(level * 100)}%"></span>
-            </div>
-          </div>
-
-          <div class="ssl-fader-block">
-            <div class="ssl-db-readout">${db} dB</div>
-            <input class="mix-vol" type="range" min="0" max="1.2" step="0.01" value="${t.volume ?? 1}" orient="vertical" aria-label="Track volume">
-          </div>
-        </div>
-      `;
-
-      strip.querySelector(".mix-mute").onclick = (e)=>{
-        e.stopPropagation();
-        t.mute = !t.mute;
-        renderMixer(); renderSidebarTracks();
-      };
-      strip.querySelector(".mix-solo").onclick = (e)=>{
-        e.stopPropagation();
-        t.solo = !t.solo;
-        renderMixer(); renderSidebarTracks();
-      };
-      strip.querySelector(".mix-width").onclick = (e)=>{
-        e.stopPropagation();
-        t.stereo = (t.stereo === false) ? true : false;
-        toast(t.stereo ? "Stereo" : "Mono");
-        renderMixer();
-      };
-
-      strip.querySelector(".mix-vol").oninput = (e)=> {
-        t.volume = parseFloat(e.target.value);
-        strip.querySelector(".ssl-db-readout").textContent = `${mixerDbLabel(t.volume)} dB`;
-        strip.querySelector(".ssl-meter-fill").style.height = `${Math.round(getMixerMeterLevel(t) * 100)}%`;
-      };
-      strip.querySelector(".mix-pan").oninput = (e)=> {
-        t.pan = parseFloat(e.target.value);
-        e.target.previousElementSibling.style.setProperty("--rot", `${knobRotation(t.pan, -1, 1)}deg`);
-      };
-      strip.querySelector(".mix-send-a").oninput = (e)=> {
-        t.sendA = parseFloat(e.target.value);
-        e.target.previousElementSibling.style.setProperty("--rot", `${knobRotation(t.sendA, 0, 1)}deg`);
-      };
-      strip.querySelector(".mix-send-b").oninput = (e)=> {
-        t.sendB = parseFloat(e.target.value);
-        e.target.previousElementSibling.style.setProperty("--rot", `${knobRotation(t.sendB, 0, 1)}deg`);
-      };
-      strip.querySelector(".mix-eq-high").oninput = (e)=> {
-        t.eqHigh = parseFloat(e.target.value);
-        e.target.previousElementSibling.style.setProperty("--rot", `${knobRotation(t.eqHigh, -1, 1)}deg`);
-      };
-      strip.querySelector(".mix-eq-mid").oninput = (e)=> {
-        t.eqMid = parseFloat(e.target.value);
-        e.target.previousElementSibling.style.setProperty("--rot", `${knobRotation(t.eqMid, -1, 1)}deg`);
-      };
-      strip.querySelector(".mix-eq-low").oninput = (e)=> {
-        t.eqLow = parseFloat(e.target.value);
-        e.target.previousElementSibling.style.setProperty("--rot", `${knobRotation(t.eqLow, -1, 1)}deg`);
-      };
-
-      strip.querySelectorAll("input").forEach(input => {
-        input.addEventListener("click", e => e.stopPropagation());
-        input.addEventListener("pointerdown", e => e.stopPropagation());
-      });
-
-      strip.onclick = ()=> {
-        setActiveTrack(i);
-        renderMixer();
-      };
-
-      mixerStrips.appendChild(strip);
-    });
-  }
 
 
 
@@ -1427,15 +1335,12 @@ function syncTrackNotesFromClip(track, clip) {
 
   function makeSnapshot() {
   ensureTracks();
+  // Deep copy: tracks now carry nested mixer state (strip, inserts, sends,
+  // sampler pads...). A shallow copy would share those objects with the live
+  // project, so later edits would silently rewrite the undo history.
   return {
-    tracks: tracks.map(t => ({
-      ...t,
-      notes: t.notes.map(n => ({ ...n })),
-      clips: (t.clips || []).map(c => ({
-        ...c,
-        notesSnapshot: (c.notesSnapshot || []).map(n => ({ ...n }))
-      })),
-    })),
+    tracks: structuredClone(tracks.map(t => ({ ...t }))),
+    mixer: window.WAWMixer ? window.WAWMixer.serialize() : undefined,
     activeTrackIndex,
     loopStartSec,
     loopEndSec,
@@ -1474,6 +1379,7 @@ function restoreSnapshot(snap) {
 
   // re-alias global notes
   ensureTracks();
+  if (snap.mixer && window.WAWMixer) window.WAWMixer.state = snap.mixer;
 
   loopStartSec = snap.loopStartSec ?? 0;
   loopEndSec   = snap.loopEndSec ?? 0;
@@ -1490,20 +1396,60 @@ function restoreSnapshot(snap) {
   }
 
   historyLocked = false;
+
+  // Keep the BPM field in sync with the restored timeline
+  if (bpmInput && snap.timelineBpm) bpmInput.value = snap.timelineBpm;
+
+  // Selection indices refer to the old notes array
+  selectedNotes.clear();
+  lastSelectedNoteIndex = -1;
+  if (activeClipId && !getActiveClip()) activeClipId = null;
+  if (selectedClipRef && !getSelectedClipRef()) selectedClipRef = null;
+
   drawPianoRoll();
   drawVelocityLane();
   drawAllLoopBars();
 }
 
-  function pushHistory() {
-    if (historyLocked) return;
+  // Snapshot taken at the start of a drag gesture; committed on release only if
+  // something actually changed. This makes undo restore the *pre*-edit state.
+  let pendingHistorySnapshot = null;
 
-    undoStack.push(makeSnapshot());
+  function pushSnapshotToUndo(snap) {
+    undoStack.push(snap);
     if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
     redoStack.length = 0;
-
-    persistHistory();
     updateUndoRedoButtons();
+    // every undoable edit is also a candidate for sharing with collaborators
+    window.WAWCollab?.notifyChange?.();
+  }
+
+  function pushHistory() {
+    if (historyLocked) return;
+    pushSnapshotToUndo(makeSnapshot());
+  }
+
+  function beginHistoryGesture() {
+    if (historyLocked) return;
+    pendingHistorySnapshot = makeSnapshot();
+  }
+
+  function commitHistoryGesture() {
+    if (!pendingHistorySnapshot) return;
+    pushSnapshotToUndo(pendingHistorySnapshot);
+    pendingHistorySnapshot = null;
+  }
+
+  function cancelHistoryGesture() {
+    pendingHistorySnapshot = null;
+  }
+
+  function refreshAfterHistoryChange() {
+    renderSidebarTracks();
+    renderSequencer();
+    renderMixer();
+    updateUndoRedoButtons();
+    restartPlaybackFromCurrentPosition();
   }
 
   function undo() {
@@ -1512,7 +1458,7 @@ function restoreSnapshot(snap) {
     const prev = undoStack.pop();
     redoStack.push(current);
     restoreSnapshot(prev);
-    persistHistory();
+    refreshAfterHistoryChange();
   }
 
   function redo() {
@@ -1521,34 +1467,14 @@ function restoreSnapshot(snap) {
     const next = redoStack.pop();
     undoStack.push(current);
     restoreSnapshot(next);
-    persistHistory();
+    refreshAfterHistoryChange();
   }
 
-  function persistHistory() {
-    try {
-      const payload = {
-        undo: undoStack,
-        redo: redoStack
-      };
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(payload));
-    } catch (e) {
-      // if storage fills up, just stop persisting
-      console.warn("History persist failed:", e);
-    }
-  }
-
-  function loadHistory() {
-    try {
-      const raw = localStorage.getItem(HISTORY_KEY);
-      if (!raw) return;
-      const payload = JSON.parse(raw);
-      undoStack = Array.isArray(payload.undo) ? payload.undo : [];
-      redoStack = Array.isArray(payload.redo) ? payload.redo : [];
-      updateUndoRedoButtons();
-    } catch (e) {
-      console.warn("History load failed:", e);
-    }
-  }
+  // Undo history used to be written to localStorage on every edit (up to 100 full
+  // project snapshots) but was never read back. That wasted time on each edit and
+  // could exhaust the storage quota shared with the project library, so it is
+  // no longer persisted. Remove any stale copy left by older versions.
+  try { localStorage.removeItem(HISTORY_KEY); } catch (e) {}
 
   function updateUndoRedoButtons() {
     const undoBtn = document.getElementById("undoBtn");
@@ -1575,7 +1501,8 @@ function restoreSnapshot(snap) {
   let tracks = [];
   let activeTrackIndex = 0;
   let notes = []; // alias -> points to tracks[activeTrackIndex].notes
-  const TRACK_INSTRUMENTS = new Set(["synth", "808"]);
+  const TRACK_INSTRUMENTS = new Set(["synth", "808", "sampler"]);
+  const TRACK_TYPES = new Set(["midi", "audio"]);
 
   function createDefaultSynthPatch() {
     return {
@@ -1621,14 +1548,16 @@ function restoreSnapshot(snap) {
       cowbellTune: 1,
       drive: 0.12,
       pan: 0,
-      gain: 0.95
+      stereo: 0.5,
+      gain: 0.95,
+      voices: {} // per-voice { tune (semitones), decay, level }
     };
   }
 
   function normalizeTrack(track, fallbackIndex = 0) {
     track.id = track.id || "trk_" + Math.random().toString(36).slice(2, 9);
     track.name = track.name || `Track ${fallbackIndex + 1}`;
-    track.type = track.type || "midi";
+    track.type = TRACK_TYPES.has(track.type) ? track.type : "midi";
     track.notes = Array.isArray(track.notes) ? track.notes : [];
     track.clips = Array.isArray(track.clips) ? track.clips : [];
     track.instrument = TRACK_INSTRUMENTS.has(track.instrument) ? track.instrument : "synth";
@@ -1646,18 +1575,23 @@ function restoreSnapshot(snap) {
       ...createDefault808Patch(),
       ...(track.drum808Patch || {})
     };
+    track.drum808Patch.voices = { ...(track.drum808Patch.voices || {}) };
+    track.armed = !!track.armed;
+    track.monitor = !!track.monitor;
+    window.WAWMixer?.normalizeTrackMix(track);
+    window.WAWSampler?.normalizeTrack(track);
     return track;
   }
 
-  function createTrack(name = null) {
+  function createTrack(name = null, { type = "midi", instrument = "synth" } = {}) {
     const id = "trk_" + Math.random().toString(36).slice(2, 9);
-    return {
+    return normalizeTrack({
       id,
       name: name || `Track ${tracks.length + 1}`,
-      type: "midi",
+      type,
       notes: [],
       clips: [], // sequencer blocks
-      instrument: "synth",
+      instrument,
       mono: false,
       volume: 1,
       pan: 0,
@@ -1666,7 +1600,7 @@ function restoreSnapshot(snap) {
       color: null,
       synthPatch: createDefaultSynthPatch(),
       drum808Patch: createDefault808Patch(),
-    };
+    }, tracks.length);
   }
 
   function ensureTracks() {
@@ -1714,7 +1648,7 @@ function updateTrackSidebarControls(trackIndex = activeTrackIndex) {
     if (lbl) lbl.textContent = Number(panSlider.value).toFixed(2);
   }
 
-  if (muteBtn) muteBtn.classList.toggle("active", !!track.muted);
+  if (muteBtn) muteBtn.classList.toggle("active", !!track.mute);
   if (soloBtn) soloBtn.classList.toggle("active", !!track.solo);
 
   // If you have per-track FX toggles etc., set them here the same way.
@@ -1808,16 +1742,20 @@ function addTrack(_e) {
     };
   }
 
-  function getPlayableTracks({ includeMuted = false } = {}) {
+  function getPlayableTracks({ includeMuted = false, ignoreSolo = false } = {}) {
     ensureTracks();
-    const anySolo = tracks.some(t => t.solo);
+    const anySolo = !ignoreSolo && tracks.some(t => t.solo);
     if (anySolo) return tracks.filter(t => t.solo);
     if (!includeMuted) return tracks.filter(t => !t.mute);
     return tracks;
   }
 
-  function getAllNotesMixdown({ includeMuted = false } = {}) {
-    const pool = getPlayableTracks({ includeMuted });
+  function getAllNotesMixdown({ includeMuted = false, ignoreSolo = false } = {}) {
+    // Playback reads clip snapshots; make sure edits made in the open MIDI editor
+    // are included (previously they were only saved when leaving the editor, so
+    // pressing Play in the editor played the old notes).
+    if (currentView === "editor" && activeClipId != null) saveEditorNotesToActiveClip();
+    const pool = getPlayableTracks({ includeMuted, ignoreSolo });
     const directNotes = pool.flatMap(t => {
       const clipsWithNotes = (t.clips || []).filter(c => (c.notesSnapshot || []).length);
       if (clipsWithNotes.length) return [];
@@ -1855,23 +1793,26 @@ function addTrack(_e) {
     const hasSolo = tracks.some(x => x.solo);
     if (hasSolo && !t.solo) return;
 
-    const velScaled = Math.max(1, Math.round((velocity || 100) * (t.volume ?? 1)));
-    
+    // track volume / pan are applied by the channel strip
+    const vel = Math.max(1, Math.round(velocity || 100));
+
     if (t.instrument === "808") {
-      play808Hit(note, velScaled, t);
+      play808Hit(note, vel, t);
       flash808Pad(note);
       return;
     }
-
-    // For now, both Synth/Drums preview via synth.
-    // Later: branch here for drum engine.
-    synthVoiceOn(note, velScaled, t);
+    if (t.instrument === "sampler") {
+      window.WAWSampler?.previewOn(t, note, vel);
+      return;
+    }
+    synthVoiceOn(note, vel, t);
   }
 
   function previewNoteOff(note, trackId = null) {
     const t = trackId ? tracks.find(track => track.id === trackId) : getActiveTrack();
     if (!t) return;
     if (t.instrument === "808") return;
+    if (t.instrument === "sampler") { window.WAWSampler?.previewOff(t, note); return; }
     synthVoiceOff(note, t.id);
   }
 
@@ -1920,7 +1861,7 @@ function addTrack(_e) {
         <div class="track-row-top">
           <div class="track-title">
             <span class="track-color-dot" style="background:${t.color}"></span>
-            <input class="track-name-input" type="text" value="${t.name || `Track ${i+1}`}" spellcheck="false">
+            <input class="track-name-input" type="text" value="${escapeHtml(t.name || `Track ${i+1}`)}" spellcheck="false">
           </div>
           <div class="track-btns">
             <button class="track-btn mute ${t.mute ? "active":""}" title="Mute track">M</button>
@@ -1931,20 +1872,23 @@ function addTrack(_e) {
           </div>
         </div>
 
+        ${t.type === "audio" ? `
+        <div class="track-select-row"><label>Type</label><span class="track-type-badge">Audio track</span></div>` : `
         <div class="track-select-row">
           <label>Instrument</label>
-          <select class="track-instrument" data-track-id="${t.id}">
+          <select class="track-instrument" data-track-id="${escapeHtml(t.id)}">
             <option value="synth"   ${t.instrument==="synth"?"selected":""}>Synth</option>
-            <option value="808"     ${t.instrument==="808"?"selected":""}>808 Kit</option>
+            <option value="808"     ${t.instrument==="808"?"selected":""}>Drum Synth</option>
+            <option value="sampler" ${t.instrument==="sampler"?"selected":""}>Sampler (16 pads)</option>
           </select>
-        </div>
+        </div>`}
 
         <div class="track-instrument-panel"></div>
 
         <div class="track-mini">
           <div>
             <label>Volume</label>
-            <input class="track-vol" type="range" min="0" max="1" step="0.01" value="${t.volume ?? 1}">
+            <input class="track-vol" type="range" min="0" max="2" step="0.01" value="${t.volume ?? 1}">
           </div>
           <div>
             <label>Pan</label>
@@ -1953,16 +1897,25 @@ function addTrack(_e) {
         </div>
 
         <div class="track-fx-row">
-          <span class="fx-chip ${t.fx?.reverb ? "active":""}" data-fx="reverb">Reverb</span>
-          <span class="fx-chip ${t.fx?.delay ? "active":""}" data-fx="delay">Delay</span>
-          <span class="fx-chip ${t.fx?.eq ? "active":""}" data-fx="eq">EQ</span>
-          <span class="fx-chip add" data-fx="add">+ FX</span>
+          ${(t.inserts || []).map(fx => `<span class="fx-chip ${fx.bypass ? "" : "active"}" data-fx-id="${escapeHtml(fx.id)}" title="Edit">${escapeHtml(window.WAWFX?.FX_TYPES[fx.type]?.name || fx.type)}</span>`).join("")}
+          <span class="fx-chip add" data-fx="add" title="Open this track's insert FX chain">+ FX</span>
         </div>
       `;
 
       // Mount synth controls inside the active track row only
       const instPanel = row.querySelector(".track-instrument-panel");
-      if (instPanel && i === activeTrackIndex && t.instrument === "synth") {
+      if (instPanel && t.type === "audio") {
+        instPanel.innerHTML = `<div class="audio-track-panel">
+          <button type="button" class="edit-synth-btn at-arm ${t.armed ? "on" : ""}">● Arm</button>
+          <button type="button" class="edit-synth-btn at-mon ${t.monitor ? "on" : ""}">Monitor</button>
+          <button type="button" class="edit-synth-btn at-import">Import Audio…</button></div>`;
+        instPanel.querySelector(".at-arm").addEventListener("click", (e) => { e.stopPropagation(); window.WAWWorkspace?.trackButton(t, "arm"); });
+        instPanel.querySelector(".at-mon").addEventListener("click", (e) => { e.stopPropagation(); window.WAWWorkspace?.trackButton(t, "monitor"); });
+        instPanel.querySelector(".at-import").addEventListener("click", (e) => { e.stopPropagation(); window.WAWWorkspace?.importAudioDialog(i); });
+      } else if (instPanel && i === activeTrackIndex && t.instrument === "sampler") {
+        instPanel.innerHTML = window.WAWSampler.sidebarPanelHtml(t);
+        window.WAWSampler.attachSidebarPanel(instPanel, t);
+      } else if (instPanel && i === activeTrackIndex && t.instrument === "synth") {
         instPanel.innerHTML = `<button type="button" id="openSynthModalBtn" class="edit-synth-btn">Edit Synth</button>`;
         instPanel.querySelector("#openSynthModalBtn")?.addEventListener("click", (e) => {
           e.stopPropagation();
@@ -1994,29 +1947,35 @@ function addTrack(_e) {
       row.querySelector(".track-btn.mute").addEventListener("click", (e) => {
         e.stopPropagation();
         t.mute = !t.mute;
+        window.WAWMixer?.syncEngine();
         renderSidebarTracks();
         updateTrackSidebarControls(i);
+        renderMixer();
+        renderSequencer();
       });
 
       row.querySelector(".track-btn.solo").addEventListener("click", (e) => {
         e.stopPropagation();
         t.solo = !t.solo;
+        window.WAWMixer?.syncEngine();
         renderSidebarTracks();
         updateTrackSidebarControls(i);
+        renderMixer();
+        renderSequencer();
       });
 
       const monoBtn = row.querySelector(".track-btn.mono");
       monoBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         t.mono = !t.mono;
-        if (t.mono) t.pan = 0;
+        window.WAWMixer?.updateTrackEngine(t);
         renderSidebarTracks();
         updateTrackSidebarControls(i);
         toast(t.mono ? "Track set to MONO" : "Track set to STEREO");
       });
 
       const instSel = row.querySelector(".track-instrument");
-      instSel.addEventListener("change", (e) => {
+      instSel?.addEventListener("change", (e) => {
         e.stopPropagation();
         updateTrackInstrument(e.currentTarget.dataset.trackId, e.currentTarget.value);
         releaseSelectFocus(e.currentTarget);
@@ -2024,24 +1983,22 @@ function addTrack(_e) {
 
       row.querySelector(".track-vol").addEventListener("input", (e) => {
         t.volume = parseFloat(e.target.value);
+        window.WAWMixer?.updateTrackEngine(t);
       });
+      row.querySelector(".track-vol").addEventListener("change", () => renderMixer());
 
       row.querySelector(".track-pan").addEventListener("input", (e) => {
         t.pan = parseFloat(e.target.value);
+        window.WAWMixer?.updateTrackEngine(t);
       });
+      row.querySelector(".track-pan").addEventListener("change", () => renderMixer());
 
       row.querySelectorAll(".fx-chip").forEach((chip) => {
         chip.addEventListener("click", (e) => {
           e.stopPropagation();
-          const fx = chip.dataset.fx;
-          t.fx = t.fx || {};
-          if (fx === "add") {
-            toast("FX rack coming next. For now: Reverb/Delay/EQ toggles.");
-            return;
-          }
-          t.fx[fx] = !t.fx[fx];
-          renderSidebarTracks();
-          updateTrackSidebarControls(i);
+          if (chip.dataset.fx === "add") { window.WAWWorkspace?.openTrackFxChain(t); return; }
+          const idx = (t.inserts || []).findIndex(fx => fx.id === chip.dataset.fxId);
+          if (idx >= 0) window.WAWMixer.openFxEditor(t, t.inserts, idx, () => window.WAWMixer.updateTrackEngine(t), `${t.name} — Inserts`);
         });
       });
 
@@ -2081,7 +2038,15 @@ function addTrack(_e) {
   // Playback / synth
   let isPlaying = false;
   let playbackStartTime = 0;
-  let scheduledOscs = [];
+  // Audio sources scheduled for playback. Ended sources remove themselves, so this
+  // no longer grows without bound while a loop plays for a long time.
+  const scheduledOscs = new Set();
+  function trackScheduledSources(sources) {
+    sources.forEach(src => {
+      scheduledOscs.add(src);
+      src.addEventListener("ended", () => scheduledOscs.delete(src), { once: true });
+    });
+  }
 
   // Selection state (multi-select)
   let selectedNotes = new Set();
@@ -2240,14 +2205,7 @@ function addTrack(_e) {
   // Add track button
   const addTrackBtn = document.getElementById("addTrackBtn");
     addTrackBtn?.addEventListener("click", addTrack);
-
-    // keyboard shortcut Alt+N
-    window.addEventListener("keydown", (e) => {
-      if (e.altKey && (e.key === "n" || e.key === "N")) {
-        e.preventDefault();
-        addTrack();
-      }
-    });
+    // Alt+N / Alt+1..9 shortcuts are handled by a single listener near the end of this file.
 
   // Scale info DOM
   const scaleNotesEl = document.getElementById("scaleNotes");
@@ -2359,20 +2317,31 @@ function addTrack(_e) {
   const synthVoices = new Map(); // trackId:midiNote -> {osc, gain}
   const synthLastNoteByTrack = new Map();
 
+  // 16 pads, MPC-style computer keyboard layout (pad 1 = bottom-left):
+  //   1 2 3 4   -> pads 13-16
+  //   Q W E R   -> pads  9-12
+  //   A S D F   -> pads  5-8
+  //   Z X C V   -> pads  1-4
+  const PAD_KEY_CODES = ["KeyZ", "KeyX", "KeyC", "KeyV", "KeyA", "KeyS", "KeyD", "KeyF", "KeyQ", "KeyW", "KeyE", "KeyR", "Digit1", "Digit2", "Digit3", "Digit4"];
+  const PAD_KEY_LABELS = PAD_KEY_CODES.map(c => c.replace(/^Key|^Digit/, ""));
   const DRUM_808_VOICES = [
-    { note: 36, key: "A", id: "kick", label: "Kick" },
-    { note: 37, key: "S", id: "rimshot", label: "Rim" },
-    { note: 38, key: "D", id: "snare", label: "Snare" },
-    { note: 39, key: "F", id: "clap", label: "Clap" },
-    { note: 42, key: "G", id: "closedHat", label: "CH" },
-    { note: 46, key: "H", id: "openHat", label: "OH" },
-    { note: 49, key: "J", id: "cymbal", label: "Cym" },
-    { note: 56, key: "K", id: "cowbell", label: "Cow" },
-    { note: 75, key: "Q", id: "claves", label: "Clave" },
-    { note: 45, key: "W", id: "lowTom", label: "LT" },
-    { note: 47, key: "E", id: "midTom", label: "MT" },
-    { note: 50, key: "R", id: "highTom", label: "HT" }
-  ];
+    { note: 36, id: "kick", label: "Kick" },
+    { note: 37, id: "rimshot", label: "Rim" },
+    { note: 38, id: "snare", label: "Snare" },
+    { note: 39, id: "clap", label: "Clap" },
+    { note: 42, id: "closedHat", label: "CH" },
+    { note: 46, id: "openHat", label: "OH" },
+    { note: 49, id: "cymbal", label: "Cym" },
+    { note: 56, id: "cowbell", label: "Cow" },
+    { note: 41, id: "lowTom", label: "LT" },
+    { note: 45, id: "midTom", label: "MT" },
+    { note: 48, id: "highTom", label: "HT" },
+    { note: 75, id: "claves", label: "Clave" },
+    { note: 64, id: "lowConga", label: "LC" },
+    { note: 63, id: "midConga", label: "MC" },
+    { note: 62, id: "highConga", label: "HC" },
+    { note: 70, id: "maracas", label: "Maraca" }
+  ].map((v, i) => ({ ...v, key: PAD_KEY_LABELS[i] }));
   const DRUM_808_BY_NOTE = new Map(DRUM_808_VOICES.map(v => [v.note, v]));
 
   // -------- CLIPBOARD --------
@@ -2536,7 +2505,7 @@ function addTrack(_e) {
 
     setTimeout(() => {
       el.classList.remove("show");
-      setTimeout(() => container.removeChild(el), 300);
+      setTimeout(() => el.remove(), 300);
     }, duration);
   }
 
@@ -2566,63 +2535,19 @@ function addTrack(_e) {
   let seqLoopWidth = 0;
   let seqLoopHeight = 0;
 
+  // The sequencer ruler and the sequencer loop bar share one canvas
+  // (#seqLoopBarCanvas). They used to be drawn by two different functions that
+  // overwrote each other, so the loop region vanished during playback.
+  // Draw everything (bar numbers, loop region, playhead) in one pass.
   function drawSequencerRuler(playheadSec = null) {
-  drawSeqRulerTo(seqLoopCtx, seqLoopWidth, seqLoopHeight, playheadSec);
-}
-
-function drawSeqRulerTo(ctx, w, h, playheadSec = null) {
-  if (!ctx || !w || !h) return;
-
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = "#05060a";
-  ctx.fillRect(0, 0, w, h);
-
-  const bpm = parseFloat(bpmInput?.value) || 120;
-  const secPerBeat = 60 / bpm;
-  const beatsPerBar = 4;
-
-  const labelW = getSeqLabelWidth();
-
-  const gridX0 = labelW;          // start drawing after labels
-  const gridWidth = w - labelW;   // usable width for time
-
-  const viewEndSec = seqViewStartSec + seqViewDuration;
-  const firstBeatIndex = Math.floor(seqViewStartSec / secPerBeat);
-  const lastBeatIndex  = Math.ceil(viewEndSec / secPerBeat);
-
-  const pxPerSec = gridWidth / seqViewDuration;
-
-  for (let b = firstBeatIndex; b <= lastBeatIndex; b++) {
-    const beatSec = b * secPerBeat;
-    const x = gridX0 + (beatSec - seqViewStartSec) * pxPerSec;
-
-    const isBar = (b % beatsPerBar === 0);
-
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, h);
-    ctx.strokeStyle = isBar ? "#27304c" : "#171c30";
-    ctx.lineWidth = isBar ? 1.2 : 0.7;
-    ctx.stroke();
-
-    if (isBar) {
-      const barNum = Math.floor(b / beatsPerBar) + 1;
-      ctx.fillStyle = "#9ca3c7";
-      ctx.font = "10px system-ui";
-      ctx.fillText(barNum, x + 2, 2);
-    }
+    drawLoopBarTo(
+      seqLoopCtx, seqLoopWidth, seqLoopHeight,
+      playheadSec,
+      getActiveLoopForView("sequencer"),
+      seqViewStartSec, seqViewDuration,
+      getSeqLabelWidth()
+    );
   }
-
-  if (playheadSec != null) {
-    const phX = gridX0 + (playheadSec - seqViewStartSec) * pxPerSec;
-    ctx.beginPath();
-    ctx.moveTo(phX, 0);
-    ctx.lineTo(phX, h);
-    ctx.strokeStyle = "#f97316";
-    ctx.lineWidth = 1.6;
-    ctx.stroke();
-  }
-}
 // end drawSequencerRuler()
 
   // ---------- METRONOME ----------
@@ -2747,39 +2672,54 @@ function drawSeqRulerTo(ctx, w, h, playheadSec = null) {
   }
 
   function handleBpmChange() {
-  const newBpm = parseFloat(bpmInput.value) || 120;
-  if (newBpm <= 0) return;
+  const min = parseFloat(bpmInput.min) || 30;
+  const max = parseFloat(bpmInput.max) || 240;
+  let newBpm = parseFloat(bpmInput.value);
+  if (!Number.isFinite(newBpm) || newBpm <= 0) newBpm = timelineBpm || 120;
+  newBpm = Math.min(max, Math.max(min, newBpm));
+  bpmInput.value = newBpm;
+  if (newBpm === timelineBpm) return;
 
-  // If nothing recorded and no loop, just update the reference BPM
-  if (!notes.length && !(loopEndSec > loopStartSec)) {
-    timelineBpm = newBpm;
+  // Changing tempo mid-take would desync the recording clock
+  if (isRecording) {
+    bpmInput.value = timelineBpm;
+    toast("Stop recording before changing BPM");
     return;
   }
 
-  // Don't rescale while recording or playing
-  if (isRecording || isPlaying) {
-    timelineBpm = newBpm;
-    return;
-  }
-
+  // Everything is stored in seconds, so keep musical positions (bars/beats)
+  // by rescaling ALL tracks, clips and loop ranges — not just the active track.
   const factor = timelineBpm / newBpm; // higher BPM → shorter seconds
+  const scaleNote = n => { n.startSec *= factor; n.endSec *= factor; };
+  const hasContent = tracks.some(t => (t.notes || []).length || (t.clips || []).length);
 
-  notes.forEach(n => {
-    n.startSec *= factor;
-    n.endSec   *= factor;
-  });
-
-  if (loopEndSec > loopStartSec) {
+  if (hasContent || loopEndSec > loopStartSec) {
+    pushHistory();
+    tracks.forEach(t => {
+      (t.notes || []).forEach(scaleNote);
+      (t.clips || []).forEach(c => {
+        c.startSec *= factor;
+        c.endSec *= factor;
+        (c.notesSnapshot || []).forEach(scaleNote);
+      });
+    });
     loopStartSec *= factor;
-    loopEndSec   *= factor;
+    loopEndSec *= factor;
+    clipLoopStartSec *= factor;
+    clipLoopEndSec *= factor;
+    viewStartSec *= factor;
+    viewDuration *= factor;
+    if (lastPlayheadSec != null) lastPlayheadSec *= factor;
   }
 
   timelineBpm = newBpm;
 
   updateTimeView();
+  renderSequencer();
   drawPianoRoll(lastPlayheadSec);
   drawVelocityLane();
-  if (loopBarCanvas) drawAllLoopBars(lastPlayheadSec);
+  drawAllLoopBars(lastPlayheadSec);
+  restartPlaybackFromCurrentPosition();
 }
 
   function updateScaleSettings() {
@@ -3028,6 +2968,8 @@ function snapEndToCommonBars(endSec, bpm, beatsPerBar = 4) {
     if (!file) return;
     try {
       const payload = JSON.parse(await file.text());
+      // exported projects embed their audio (sampler pads + audio clips)
+      if (payload.samples) await window.WAWSamples?.importSamples(payload.samples);
       loadProjectPayload(payload);
       const importedName = file.name.replace(/\.json$/i, "");
       saveProjectToLibrary(importedName, { newProject: true });
@@ -3332,6 +3274,8 @@ function snapEndToCommonBars(endSec, bpm, beatsPerBar = 4) {
     if (drum808Drive) drum808Drive.value = merged.drive;
     if (drum808Pan) drum808Pan.value = merged.pan;
     if (drum808Gain) drum808Gain.value = merged.gain;
+    const stereoEl = document.getElementById("drum808Stereo");
+    if (stereoEl) stereoEl.value = merged.stereo ?? 0.5;
     update808ValueLabels(merged);
   }
 
@@ -3348,6 +3292,8 @@ function snapEndToCommonBars(endSec, bpm, beatsPerBar = 4) {
     drum808DriveVal.textContent = patch.drive.toFixed(2);
     drum808PanVal.textContent = patch.pan.toFixed(2);
     drum808GainVal.textContent = patch.gain.toFixed(2);
+    const stereoVal = document.getElementById("drum808StereoVal");
+    if (stereoVal) stereoVal.textContent = (patch.stereo ?? 0.5).toFixed(2);
   }
 
   function update808FromUI() {
@@ -3363,6 +3309,8 @@ function snapEndToCommonBars(endSec, bpm, beatsPerBar = 4) {
     drum808State.drive = parseFloat(drum808Drive.value);
     drum808State.pan = parseFloat(drum808Pan.value);
     drum808State.gain = parseFloat(drum808Gain.value);
+    const stereoEl = document.getElementById("drum808Stereo");
+    if (stereoEl) drum808State.stereo = parseFloat(stereoEl.value);
     update808ValueLabels(drum808State);
     const track = getActiveTrack();
     if (track?.instrument === "808") track.drum808Patch = { ...drum808State };
@@ -3463,7 +3411,7 @@ function snapEndToCommonBars(endSec, bpm, beatsPerBar = 4) {
     releaseSelectFocus(drum808Preset);
   });
   drum808SavePresetBtn?.addEventListener("click", saveCustom808Preset);
-  [drum808Tone, drum808Pitch, drum808Punch, drum808Noise, drum808Decay, drum808Snap, drum808HatDecay, drum808TomDecay, drum808CowbellTune, drum808Drive, drum808Pan, drum808Gain].forEach(el => {
+  [drum808Tone, drum808Pitch, drum808Punch, drum808Noise, drum808Decay, drum808Snap, drum808HatDecay, drum808TomDecay, drum808CowbellTune, drum808Drive, drum808Pan, drum808Gain, document.getElementById("drum808Stereo")].forEach(el => {
     el?.addEventListener("input", update808FromUI);
   });
   drum808Modal?.addEventListener("change", releaseSynthBodyFocus, true);
@@ -3502,6 +3450,8 @@ function snapEndToCommonBars(endSec, bpm, beatsPerBar = 4) {
     if (synthGain) synthGain.value = merged.gain;
 
     updateSynthValueLabels(merged);
+    // extended voice parameters (unison, FM, filter type, ...) from js/synth.js
+    if (window.WAWSynth) Object.assign(synthState, window.WAWSynth.writeExtraParams(merged));
     if (synthFilter) {
       synthFilter.frequency.value = merged.cutoff;
       synthFilter.Q.value = merged.filterQ;
@@ -3564,6 +3514,7 @@ function snapEndToCommonBars(endSec, bpm, beatsPerBar = 4) {
     synthState.gain = parseFloat(synthGain.value);
 
     updateSynthValueLabels(synthState);
+    window.WAWSynth?.readExtraParams(synthState);
 
     const activeTrack = getActiveTrack();
     if (activeTrack?.instrument === "synth") {
@@ -3643,233 +3594,9 @@ function snapEndToCommonBars(endSec, bpm, beatsPerBar = 4) {
       }
       return;
     }
-
-    synthFilterQ.value = 0.8;
-    synthDetune.value = 0;
-    synthOsc2Wave.value = "off";
-    synthOsc2Mix.value = 0;
-    synthOsc2Detune.value = 0;
-    synthNoise.value = 0;
-    synthGlide.value = 0;
-    synthFilterEnv.value = 0;
-    synthFilterAttack.value = 0.01;
-    synthFilterDecay.value = 0.25;
-    synthLfoTarget.value = "pitch";
-    synthLfoRate.value = 0;
-    synthLfoAmount.value = 0;
-    synthDrive.value = 0;
-    synthPan.value = 0;
-    synthChorus.value = 0;
-    synthDelaySend.value = 0;
-    synthReverbSend.value = 0;
-    switch (id) {
-      case "glassKeys":
-        synthWave.value = "triangle";
-        synthAttack.value = 0.005;
-        synthDecay.value = 0.45;
-        synthSustain.value = 0.22;
-        synthRelease.value = 0.45;
-        synthCutoff.value = 9500;
-        synthFilterQ.value = 1.6;
-        synthDetune.value = 3;
-        synthGain.value = 0.24;
-        break;
-      case "softSine":
-        synthWave.value = "sine";
-        synthAttack.value = 0.02;
-        synthDecay.value = 0.15;
-        synthSustain.value = 0.85;
-        synthRelease.value = 0.35;
-        synthCutoff.value = 6000;
-        synthGain.value = 0.22;
-        break;
-      case "warmPad":
-        synthWave.value = "triangle";
-        synthAttack.value = 0.4;
-        synthDecay.value = 0.5;
-        synthSustain.value = 0.9;
-        synthRelease.value = 1.0;
-        synthCutoff.value = 5000;
-        synthFilterQ.value = 0.6;
-        synthDetune.value = -4;
-        synthOsc2Wave.value = "sine";
-        synthOsc2Mix.value = 0.28;
-        synthOsc2Detune.value = 7;
-        synthChorus.value = 0.42;
-        synthReverbSend.value = 0.28;
-        synthGain.value = 0.2;
-        break;
-      case "slowChoir":
-        synthWave.value = "triangle";
-        synthAttack.value = 0.75;
-        synthDecay.value = 0.65;
-        synthSustain.value = 0.78;
-        synthRelease.value = 1.4;
-        synthCutoff.value = 3600;
-        synthFilterQ.value = 1.1;
-        synthDetune.value = 6;
-        synthGain.value = 0.2;
-        break;
-      case "brightPluck":
-        synthWave.value = "square";
-        synthAttack.value = 0.005;
-        synthDecay.value = 0.15;
-        synthSustain.value = 0.0;
-        synthRelease.value = 0.1;
-        synthCutoff.value = 9000;
-        synthFilterQ.value = 2.2;
-        synthDetune.value = 0;
-        synthGain.value = 0.22;
-        break;
-      case "marimbaPluck":
-        synthWave.value = "triangle";
-        synthAttack.value = 0.003;
-        synthDecay.value = 0.22;
-        synthSustain.value = 0.0;
-        synthRelease.value = 0.12;
-        synthCutoff.value = 5200;
-        synthFilterQ.value = 3.5;
-        synthDetune.value = 0;
-        synthGain.value = 0.26;
-        break;
-      case "sawLead":
-        synthWave.value = "sawtooth";
-        synthAttack.value = 0.01;
-        synthDecay.value = 0.18;
-        synthSustain.value = 0.7;
-        synthRelease.value = 0.25;
-        synthCutoff.value = 10000;
-        synthFilterQ.value = 1.4;
-        synthDetune.value = -3;
-        synthOsc2Wave.value = "sawtooth";
-        synthOsc2Mix.value = 0.22;
-        synthOsc2Detune.value = 9;
-        synthDrive.value = 0.18;
-        synthDelaySend.value = 0.14;
-        synthGain.value = 0.24;
-        break;
-      case "squareLead":
-        synthWave.value = "square";
-        synthAttack.value = 0.008;
-        synthDecay.value = 0.12;
-        synthSustain.value = 0.65;
-        synthRelease.value = 0.18;
-        synthCutoff.value = 7600;
-        synthFilterQ.value = 1.8;
-        synthDetune.value = 4;
-        synthGain.value = 0.23;
-        break;
-      case "analogBass":
-        synthWave.value = "square";
-        synthAttack.value = 0.01;
-        synthDecay.value = 0.2;
-        synthSustain.value = 0.8;
-        synthRelease.value = 0.15;
-        synthCutoff.value = 3000;
-        synthFilterQ.value = 1.2;
-        synthDetune.value = -2;
-        synthOsc2Wave.value = "square";
-        synthOsc2Mix.value = 0.18;
-        synthOsc2Detune.value = -12;
-        synthDrive.value = 0.12;
-        synthGain.value = 0.28;
-        break;
-      case "subBass":
-        synthWave.value = "sine";
-        synthAttack.value = 0.01;
-        synthDecay.value = 0.18;
-        synthSustain.value = 0.9;
-        synthRelease.value = 0.18;
-        synthCutoff.value = 1400;
-        synthFilterQ.value = 0.9;
-        synthDetune.value = 0;
-        synthOsc2Wave.value = "sine";
-        synthOsc2Mix.value = 0.22;
-        synthOsc2Detune.value = -12;
-        synthGain.value = 0.34;
-        break;
-      case "acidBass":
-        synthWave.value = "sawtooth";
-        synthAttack.value = 0.005;
-        synthDecay.value = 0.12;
-        synthSustain.value = 0.45;
-        synthRelease.value = 0.08;
-        synthCutoff.value = 2200;
-        synthFilterQ.value = 6.5;
-        synthDetune.value = 5;
-        synthFilterEnv.value = 3600;
-        synthFilterAttack.value = 0.01;
-        synthFilterDecay.value = 0.22;
-        synthLfoTarget.value = "filter";
-        synthLfoRate.value = 3.8;
-        synthLfoAmount.value = 420;
-        synthDrive.value = 0.32;
-        synthGain.value = 0.28;
-        break;
-      case "softOrgan":
-        synthWave.value = "square";
-        synthAttack.value = 0.02;
-        synthDecay.value = 0.08;
-        synthSustain.value = 0.86;
-        synthRelease.value = 0.22;
-        synthCutoff.value = 6200;
-        synthFilterQ.value = 1.0;
-        synthDetune.value = -7;
-        synthGain.value = 0.21;
-        break;
-      case "noirKeys":
-        synthWave.value = "triangle";
-        synthAttack.value = 0.015;
-        synthDecay.value = 0.32;
-        synthSustain.value = 0.38;
-        synthRelease.value = 0.62;
-        synthCutoff.value = 4200;
-        synthFilterQ.value = 2.0;
-        synthDetune.value = 2;
-        synthGain.value = 0.24;
-        break;
-      case "airPad":
-        synthWave.value = "sine";
-        synthAttack.value = 0.9;
-        synthDecay.value = 0.8;
-        synthSustain.value = 0.82;
-        synthRelease.value = 1.8;
-        synthCutoff.value = 7200;
-        synthFilterQ.value = 0.5;
-        synthDetune.value = 8;
-        synthOsc2Wave.value = "triangle";
-        synthOsc2Mix.value = 0.24;
-        synthOsc2Detune.value = -9;
-        synthNoise.value = 0.04;
-        synthChorus.value = 0.55;
-        synthReverbSend.value = 0.45;
-        synthGain.value = 0.18;
-        break;
-      case "pluckBass":
-        synthWave.value = "square";
-        synthAttack.value = 0.004;
-        synthDecay.value = 0.18;
-        synthSustain.value = 0.12;
-        synthRelease.value = 0.1;
-        synthCutoff.value = 2600;
-        synthFilterQ.value = 4.0;
-        synthDetune.value = 0;
-        synthFilterEnv.value = 1800;
-        synthFilterAttack.value = 0.005;
-        synthFilterDecay.value = 0.16;
-        synthDrive.value = 0.18;
-        synthGain.value = 0.3;
-        break;
-      case "init":
-      default:
-        synthWave.value = "sine";
-        synthAttack.value = 0.01;
-        synthDecay.value = 0.1;
-        synthSustain.value = 0.8;
-        synthRelease.value = 0.25;
-        synthCutoff.value = 8000;
-        synthGain.value = 0.25;
-    }
+    // table-driven presets live in js/synth.js
+    const patch = window.WAWSynth.presetPatch(id) || window.WAWSynth.fullPatch({});
+    loadSynthPatchToUI(patch);
     updateSynthFromUI();
   }
 
@@ -4232,6 +3959,10 @@ function ensureAudioContext() {
   const activeTrack = getActiveTrack();
   const trackType = activeTrack?.type || "midi"; // "midi" | "audio"
 
+  // Snapshot BEFORE the take (overwrite + live clip modify state right away),
+  // so a single undo removes the whole recording.
+  pushHistory();
+
   isRecording = true;
   currentNote = null;
   midiActiveNotes.clear();
@@ -4283,15 +4014,16 @@ function ensureAudioContext() {
     liveRecordingClipEl = document.querySelector(`.seq-clip[data-clip-id="${newClip.id}"]`);
   }
 
-  if (trackType === "audio") {
-    // Hook for future audio buffer recording on audio tracks
-    if (!micStream) {
-      statusEl.textContent = "Audio track selected — enable Mic to record audio.";
-    }
+  // Audio tracks: capture the input on the armed audio track(s) (or the active audio track)
+  const audioTargets = window.WAWAudio?.recordTargets() || [];
+  if (audioTargets.length) {
+    window.WAWAudio.beginTrackRecording({ recordingStartTime, recordingBaseSec, recordingLoopLen });
   }
 
-  // Background playback while recording in loop (or if user transitioned from Play -> Rec)
-  if (hasActiveLoop || (wasPlaying && overdubEnabled)) {
+  // Background playback while recording: always play the existing arrangement so
+  // the performer hears what they record against (standard DAW behaviour).
+  void wasPlaying;
+  {
     isBackgroundPlayback = true;
     isPlaying = true;
     playheadWasManuallySet = false;
@@ -4374,13 +4106,12 @@ function updateLiveRecordingClip(songPos) {
     const pxPerSec = getSeqPxPerSec();
     liveRecordingClipEl.style.width = Math.max(8, clipLen * pxPerSec) + "px";
     const thumb = liveRecordingClipEl.querySelector(".clip-thumb");
-    if (thumb) drawClipThumbnail(thumb, liveRecordingClip);
+    if (thumb) drawClipPreview(thumb, liveRecordingClip);
   }
 }
 
 function stopRecording() {
   if (!isRecording) return;
-  pushHistory();
 
   isRecording = false;
   if (recordAnimId) {
@@ -4506,6 +4237,13 @@ if (trackType === "midi" && targetTrack) {
   drawPianoRoll(lastPlayheadSec);
   drawVelocityLane();
   if (loopBarCanvas) drawAllLoopBars(lastPlayheadSec);
+
+  if (window.WAWAudio?.isRecordingAudio()) {
+    window.WAWAudio.endTrackRecording().catch(err => {
+      console.error(err);
+      statusEl.textContent = "Audio take could not be saved: " + err.message;
+    });
+  }
 
   if (isBackgroundPlayback) {
     isBackgroundPlayback = false;
@@ -4823,8 +4561,11 @@ if (trackType === "midi" && targetTrack) {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
 
-    const w = canvas.width  || canvas.clientWidth  || 0;
-    const h = canvas.height || canvas.clientHeight || 0;
+    // Use CSS pixels: resizeCanvases() already applies a devicePixelRatio
+    // transform, so using canvas.width here drew the circle 2x too large
+    // (and clipped) on HiDPI screens.
+    const w = canvas.clientWidth  || 0;
+    const h = canvas.clientHeight || 0;
     if (w < 30 || h < 30) return;
 
     const padding = 20;
@@ -5188,11 +4929,8 @@ if (trackType === "midi" && targetTrack) {
         ctx.stroke();
       }
     }
-    if (loopBarCanvas) {
-      drawAllLoopBars(playheadSec);
-    }
     drawAllLoopBars(playheadSec);
-  } 
+  }
   // End drawPianoRoll
 
   // Draw loop bar to given context
@@ -5321,15 +5059,7 @@ function drawAllLoopBars(playheadSec = null) {
 
   // sequencer bar uses the same left gutter as the track labels,
   // so bar 1 starts exactly where clips start.
-  const seqLoop = getActiveLoopForView("sequencer");
-  const seqLabelWidth = getSeqLabelWidth();
-  drawLoopBarTo(
-    seqLoopCtx, seqLoopWidth, seqLoopHeight,
-    playheadSec,
-    seqLoop,
-    seqViewStartSec, seqViewDuration,
-    seqLabelWidth
-  );
+  drawSequencerRuler(playheadSec);
 }
 
 // Set playhead position (in seconds)
@@ -5358,6 +5088,8 @@ function makeLoopInteractor(canvas, getView) {
   let dragMode = null;   // "new" | "resizeStart" | "resizeEnd"
   let anchorSec = 0;
   let downSec = 0;
+  let downX = 0;
+  let dragged = false;
 
   const THRESH_PX = 4;
 
@@ -5382,7 +5114,7 @@ function makeLoopInteractor(canvas, getView) {
 
   canvas.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
-    canvas.setPointerCapture(e.pointerId);
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -5390,8 +5122,10 @@ function makeLoopInteractor(canvas, getView) {
     const sec = timeFromX(x);
 
     down = true;
+    dragged = false;
     dragMode = null;
     downSec = sec;
+    downX = x;
 
     const edge = nearestEdge(sec, view);
     if (edge === "start") { dragMode = "resizeStart"; anchorSec = loopEndSec; }
@@ -5408,13 +5142,16 @@ function makeLoopInteractor(canvas, getView) {
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const view = getView();
     const sec = timeFromX(x);
 
-    const movedPx = Math.abs(e.movementX);
-    if (movedPx < THRESH_PX && dragMode === "new") return;
+    // Threshold is measured from the press position. It used to compare the
+    // per-event movementX, so slow drags (a few px per event) never created a loop.
+    if (!dragged && dragMode === "new" && Math.abs(x - downX) < THRESH_PX) return;
+    if (!dragged) beginHistoryGesture();
+    dragged = true;
 
     loopEnabled = true;
+    loopBtn?.classList.toggle("active", true);
 
     if (dragMode === "new") {
       // allow left OR right drag
@@ -5426,79 +5163,34 @@ function makeLoopInteractor(canvas, getView) {
       loopEndSec = Math.max(sec, anchorSec + 0.1);
     }
 
-    // snap loop edges
-    loopStartSec = snapSec(loopStartSec);
+    // snap loop edges (never let them collapse onto each other)
+    loopStartSec = Math.max(0, snapSec(loopStartSec));
     loopEndSec   = snapSec(loopEndSec);
-
-    drawAllLoopBars(lastPlayheadSec);
-    renderSequencer();
-  });
-
-  canvas.addEventListener("pointerup", () => {
-    down = false;
-  });
-}
-
-// global move/up stay the same, but tweak "new" to allow left drag:
-window.addEventListener("mousemove", (e) => {
-  if (!loopMouseDown || !loopDragState.active) return;
-
-  // decide which bar we started on
-  const activeCanvas = loopDragState.canvas;
-  const rect = activeCanvas.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-
-  const { startSec, durationSec, widthPx } = loopDragState.getView();
-  const sec = startSec + (x / Math.max(10, widthPx)) * durationSec;
-
-  const minLoopLen = 0.1;
-
-  if (loopDragState.mode === "pendingNew" && !loopDragging) {
-    if (Math.abs(x - loopDownX) > LOOP_DRAG_THRESHOLD_PX) {
-      loopDragging = true;
-      loopDragState.mode = "new";
-      loopStartSec = loopDragState.anchorSec;
-      loopEndSec = loopStartSec + 0.25;
-    } else return;
-  }
-
-  if (loopDragState.mode === "resizeStart") {
-    loopStartSec = Math.max(0, Math.min(sec, loopEndSec - minLoopLen));
-  } else if (loopDragState.mode === "resizeEnd") {
-    loopEndSec = Math.max(sec, loopStartSec + minLoopLen);
-  } else if (loopDragState.mode === "new") {
-    const a = loopDragState.anchorSec;
-    loopStartSec = Math.min(a, sec);
-    loopEndSec   = Math.max(a, sec);
-  }
-
-  drawAllLoopBars(lastPlayheadSec);
-});
-
-window.addEventListener("mouseup", () => {
-  if (!loopMouseDown) return;
-
-  if (loopDragState.mode === "pendingNew" && !loopDragging) {
-    lastPlayheadSec = loopDownSec;
-    playheadWasManuallySet = true;
-
-    if (isPlaying) {
-      stopPlayback();
-      const playbackNotes = collectSequencerNotesInRange(0, Infinity);
-      playNotes(playbackNotes);
+    if (loopEndSec <= loopStartSec) {
+      const bpm = parseFloat(bpmInput?.value) || 120;
+      loopEndSec = loopStartSec + getGridSeconds(60 / bpm);
     }
 
+    // Cheap redraw only; the full lane rebuild happens once on release.
     drawAllLoopBars(lastPlayheadSec);
-    drawPianoRoll(lastPlayheadSec);
+  });
+
+  function endLoopPointer() {
+    if (!down) return;
+    down = false;
+    if (dragged) {
+      commitHistoryGesture();
+      renderSequencer();
+    } else if (isPlaying) {
+      // plain click while playing: jump playback to the clicked position
+      restartPlaybackFromCurrentPosition();
+    }
+    dragged = false;
   }
 
-  loopMouseDown = false;
-  loopDragState.active = false;
-  loopDragState.mode = null;
-  loopDragState.anchorSec = 0;
-  loopDragState.canvas = null;
-  loopDragState.getView = null;
-});
+  canvas.addEventListener("pointerup", endLoopPointer);
+  canvas.addEventListener("pointercancel", endLoopPointer);
+}
 
 makeLoopInteractor(loopBarCanvas, () => ({
   startSec: viewStartSec,
@@ -5512,131 +5204,6 @@ makeLoopInteractor(seqLoopBarCanvas, () => ({
   leftGutterPx: getSeqLabelWidth()
 }));
 
-// ---------- LOOP BAR INTERACTION ----------
-const loopDragState = {
-  active: false,
-  mode: null, // "pendingNew" | "new" | "resizeStart" | "resizeEnd"
-  anchorSec: 0
-};
-
-const LOOP_DRAG_THRESHOLD_PX = 4;
-let loopMouseDown = false;
-let loopDownX = 0;
-let loopDownSec = 0;
-let loopDragging = false;
-
-function timeFromLoopBarX(x) {
-  const keyLabelWidth = KEY_LABEL_WIDTH;
-  const gridX0 = keyLabelWidth;
-  const gridWidth = Math.max(10, loopWidth - keyLabelWidth);
-  const clampedX = Math.min(Math.max(x, gridX0), gridX0 + gridWidth);
-  const tNorm = (clampedX - gridX0) / gridWidth;
-  return viewStartSec + tNorm * viewDuration;
-}
-
-function nearestEdgeHit(sec, thresholdSec = 0.1) {
-  if (loopEndSec <= loopStartSec) return null;
-  const dStart = Math.abs(sec - loopStartSec);
-  const dEnd = Math.abs(sec - loopEndSec);
-  if (dStart <= thresholdSec && dStart <= dEnd) return "start";
-  if (dEnd <= thresholdSec && dEnd <= dStart) return "end";
-  return null;
-}
-
-// Mouse events for loop bar
-if (loopBarCanvas) {
-  loopBarCanvas.addEventListener("mousedown", (e) => {
-    if (e.button !== 0) return; // left only
-    const rect = loopBarCanvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-
-    const sec = timeFromLoopBarX(x);
-
-    loopMouseDown = true;
-    loopDownX = x;
-    loopDownSec = sec;
-    loopDragging = false;
-
-    loopDragState.canvas = canvas;
-    loopDragState.getView = getView;
-
-    const edge = nearestEdgeHit(sec);
-
-    if (edge === "start") {
-      loopDragState.active = true;
-      loopDragState.mode = "resizeStart";
-      loopDragState.anchorSec = loopEndSec;
-      loopDragging = true;
-    } else if (edge === "end") {
-      loopDragState.active = true;
-      loopDragState.mode = "resizeEnd";
-      loopDragState.anchorSec = loopStartSec;
-      loopDragging = true;
-    } else {
-      // don't change loop yet — wait to see if user drags
-      loopDragState.active = true;
-      loopDragState.mode = "pendingNew";
-      loopDragState.anchorSec = sec;
-    }
-
-    drawAllLoopBars(playheadSec);
-  });
-
-  window.addEventListener("mousemove", (e) => {
-    if (!loopMouseDown || !loopDragState.active) return;
-
-    const rect = loopBarCanvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const sec = timeFromLoopBarX(x);
-
-    const minLoopLen = 0.1; 
-
-    if (loopDragState.mode === "pendingNew" && !loopDragging) {
-      if (Math.abs(x - loopDownX) > LOOP_DRAG_THRESHOLD_PX) {
-        loopDragging = true;
-        loopDragState.mode = "new";
-        loopStartSec = loopDragState.anchorSec;
-        loopEndSec = loopStartSec + 0.25;
-      } else {
-        return;
-      }
-    }
-
-    if (loopDragState.mode === "resizeStart") {
-      loopStartSec = Math.max(0, Math.min(sec, loopEndSec - 0.1));
-    } else if (loopDragState.mode === "resizeEnd") {
-      loopEndSec = Math.max(sec, loopStartSec + minLoopLen);
-    } else if (loopDragState.mode === "new") {
-      loopEndSec = Math.max(sec, loopStartSec + minLoopLen);
-    }
-
-    drawAllLoopBars(playheadSec);
-  });
-
-  window.addEventListener("mouseup", () => {
-    if (!loopMouseDown) return;
-
-    // plain click (not drag): set playhead + restart playback if needed
-    if (loopDragState.mode === "pendingNew" && !loopDragging) {
-      lastPlayheadSec = loopDownSec;
-      playheadWasManuallySet = true;
-
-      if (isPlaying) {
-        stopPlayback();
-        const playbackNotes = collectSequencerNotesInRange(0, Infinity);
-        playNotes(playbackNotes);
-      }
-
-      drawAllLoopBars(playheadSec);
-      drawPianoRoll(lastPlayheadSec);
-    }
-
-    loopMouseDown = false;
-    loopDragState.active = false;
-    loopDragState.mode = null;
-    loopDragState.anchorSec = 0;
-  });
-}
 
   // Mouse interactions for piano roll
   let isMouseDown = false;
@@ -5773,7 +5340,10 @@ if (loopBarCanvas) {
     });
 
     pianoRollCanvas.addEventListener("mouseup", () => {
-      if (dragState.active) pushHistory();
+      if (dragState.active) {
+        if (dragState.moved) commitHistoryGesture();
+        else cancelHistoryGesture();
+      }
 
       if (currentEditMode === "draw" && drawingCandidate && !dragState.active) {
         createNoteAtClick(dragStartX, dragStartY);
@@ -5797,6 +5367,11 @@ if (loopBarCanvas) {
     });
 
     pianoRollCanvas.addEventListener("mouseleave", () => {
+      // Edits made during the drag stay applied, so keep them undoable
+      if (dragState.active) {
+        if (dragState.moved) commitHistoryGesture();
+        else cancelHistoryGesture();
+      }
       isMouseDown = false;
       drawingCandidate = false;
       selectingRect = null;
@@ -5929,7 +5504,9 @@ if (loopBarCanvas) {
     const note = notes[hitIndex];
     if (!note) return;
 
+    beginHistoryGesture();
     dragState.active = true;
+    dragState.moved = false;
     dragState.noteIndex = hitIndex;
     dragState.indices = selectedNotes.size ? Array.from(selectedNotes) : [hitIndex];
     dragState.startX = x;
@@ -5962,6 +5539,7 @@ if (loopBarCanvas) {
     const dy = y - dragState.startY;
     const dSec = dx / localPixelsPerSec;
     const dNotes = -dy / localPixelsPerNote;
+    if (dx !== 0 || dy !== 0) dragState.moved = true;
 
     const indices = dragState.indices && dragState.indices.length
       ? dragState.indices
@@ -6072,6 +5650,7 @@ if (loopBarCanvas) {
 
     targetStart = quantizeTime(targetStart, gridSec, swingAmount, true);
 
+    pushHistory();
     const created = [];
 
     clipboardNotes.forEach(rel => {
@@ -6099,7 +5678,6 @@ if (loopBarCanvas) {
     updateTimeView();
     drawPianoRoll(lastPlayheadSec);
     drawVelocityLane();
-    if (loopBarCanvas) drawAllLoopBars(playheadSec);
 
     statusEl.textContent = `Pasted ${created.length} note(s).`;
   }
@@ -6140,6 +5718,8 @@ if (loopBarCanvas) {
       "clipOpen",
       "clipSetLoop",
       "clipClear",
+      "clipSplit",
+      "clipMute",
       "deleteClip"
     ];
     clipOnly.forEach(id => {
@@ -6238,12 +5818,12 @@ if (loopBarCanvas) {
   }
 
   function createNoteAtClick(x, y) {
-    pushHistory();
     const keyLabelWidth = KEY_LABEL_WIDTH;
     const gridX0 = keyLabelWidth;
     const gridWidth = prWidth - keyLabelWidth;
 
     if (x < gridX0 || gridWidth <= 0) return;
+    pushHistory();
 
     const bpm = parseFloat(bpmInput.value) || 120;
     const secPerBeat = 60 / bpm;
@@ -6297,6 +5877,9 @@ if (loopBarCanvas) {
         createdIndices.push(notes.length - 1);
       }
     }
+
+    // chord voicing (inversion / per-tone octave) from the Key & Scale panel
+    if (createdIndices.length > 1) window.WAWWorkspace?.applyVoicing(createdIndices.map(i => notes[i]));
 
     selectedNotes.clear();
     createdIndices.forEach(i => selectedNotes.add(i));
@@ -6374,19 +5957,6 @@ if (loopBarCanvas) {
     e.preventDefault();
     if (currentView === "sequencer" && deleteSelectedClip()) return;
     deleteSelectedNotes();
-  });
-
-  // Multitrack hotkeys:
-  // Alt+1..9 switch tracks, Alt+N creates new track
-  window.addEventListener("keydown", (e) => {
-    if (e.altKey && !e.shiftKey && !e.ctrlKey) {
-      if (e.key >= "1" && e.key <= "9") {
-        setActiveTrack(Number(e.key) - 1);
-      }
-      if (e.key.toLowerCase() === "n") {
-        addTrack();
-      }
-    }
   });
 
  window.addEventListener("DOMContentLoaded", () => {
@@ -6646,15 +6216,19 @@ if (loopBarCanvas) {
 
   function attachVelocityEvents() {
     if (!velocityCanvas) return;  // SAFETY
-
-    let velDragActive = false;
-    let velDragNoteIndex = -1;
+    // NOTE: velDragActive / velDragNoteIndex are the module-level variables above.
+    // They used to be re-declared here, which shadowed them so updateVelocityFromY()
+    // always saw index -1 and velocity editing silently did nothing.
+    let velStartValue = null;
 
     function endVelDrag() {
       if (!velDragActive) return;
+      const n = notes[velDragNoteIndex];
+      if (n && n.velocity !== velStartValue) commitHistoryGesture();
+      else cancelHistoryGesture();
       velDragActive = false;
       velDragNoteIndex = -1;
-      pushHistory?.();
+      velStartValue = null;
     }
 
     velocityCanvas.addEventListener("mousedown", (e) => {
@@ -6669,8 +6243,10 @@ if (loopBarCanvas) {
         return;
       }
 
+      beginHistoryGesture();
       velDragActive = true;
       velDragNoteIndex = idx;
+      velStartValue = notes[idx].velocity;
 
       selectedNotes.clear();
       selectedNotes.add(idx);
@@ -6710,16 +6286,6 @@ if (loopBarCanvas) {
     return 440 * Math.pow(2, (m - 69) / 12);
   }
 
-  function getInstrumentWave(instrument, patch = synthState) {
-    switch (instrument) {
-      case "bass": return "square";
-      case "lead": return "sawtooth";
-      case "pad":
-      case "strings": return "triangle";
-      case "piano": return "triangle";
-      default: return patch.wave;
-    }
-  }
 
   function get808VoiceForNote(midiNote) {
     return DRUM_808_BY_NOTE.get(midiNote) || DRUM_808_BY_NOTE.get(36);
@@ -6729,13 +6295,11 @@ if (loopBarCanvas) {
     const ctx = ensureAudioContext();
     triggerSynthetic808(
       ctx,
-      synthMasterGain,
+      window.WAWMixer?.getTrackInput(track) || synthMasterGain,
       midiNote,
       velocity,
       track?.drum808Patch || drum808State,
-      when,
-      track?.pan ?? 0,
-      track?.volume ?? 1
+      when
     );
   }
 
@@ -6743,150 +6307,37 @@ if (loopBarCanvas) {
     const ctx = ensureAudioContext();
     const sources = triggerSynthetic808(
       ctx,
-      synthMasterGain,
+      window.WAWMixer?.getTrackInput(noteMeta.trackId) || synthMasterGain,
       midiNote,
       velocity,
       noteMeta.drum808Patch || drum808State,
-      startSec,
-      noteMeta.trackPan ?? 0,
-      noteMeta.trackVolume ?? 1
+      startSec
     );
-    scheduledOscs.push(...sources);
+    trackScheduledSources(sources);
   }
 
-  function triggerSynthetic808(ctx, destination, midiNote, velocity = 100, patch = createDefault808Patch(), when = 0, panValue = 0, volume = 1) {
+  // Drum voices are synthesized in js/drums.js (no samples). Volume and pan are
+  // applied by the track's channel strip, so they are not baked in here.
+  // `when` is relative to ctx.currentTime.
+  function triggerSynthetic808(ctx, destination, midiNote, velocity = 100, patch = createDefault808Patch(), when = 0) {
     const voice = get808VoiceForNote(midiNote);
     const kit = { ...createDefault808Patch(), ...(patch || {}) };
-    const t0 = ctx.currentTime + Math.max(0, when);
-    const out = ctx.createGain();
-    const vel = Math.max(0.02, Math.min(1.4, velocity / 127)) * (volume ?? 1) * (kit.gain ?? 1);
-    out.gain.value = vel;
-    const outPatch = { ...createDefaultSynthPatch(), drive: kit.drive ?? 0, pan: kit.pan ?? 0, chorus: 0, delaySend: 0, reverbSend: 0 };
-    connectSynthOutput(ctx, out, destination, outPatch, panValue);
-
-    const sources = [];
-    const pitch = kit.pitch ?? 1;
-    const tone = kit.tone ?? 1;
-    const decayScale = kit.decay ?? 1;
-    const punch = kit.punch ?? 0.8;
-    const noiseLevel = kit.noise ?? 0.7;
-
-    const startOsc = (type, freq, duration, peak = 1, endFreq = freq, attack = 0.002) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      const stopAt = t0 + duration + 0.08;
-      osc.type = type;
-      osc.frequency.setValueAtTime(freq, t0);
-      if (Math.abs(endFreq - freq) > 0.1) {
-        osc.frequency.exponentialRampToValueAtTime(Math.max(20, endFreq), t0 + Math.min(duration, 0.22));
-      }
-      gain.gain.setValueAtTime(0.0001, t0);
-      gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), t0 + attack);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
-      osc.connect(gain);
-      gain.connect(out);
-      osc.start(t0);
-      osc.stop(stopAt);
-      sources.push(osc);
-      return osc;
-    };
-
-    const startNoise = (duration, peak = 1, highpass = 900, bandpassFreq = null, attack = 0.001) => {
-      const src = ctx.createBufferSource();
-      const filter = ctx.createBiquadFilter();
-      const gain = ctx.createGain();
-      src.buffer = createNoiseBuffer(ctx, Math.max(0.12, duration + 0.1));
-      filter.type = bandpassFreq ? "bandpass" : "highpass";
-      filter.frequency.value = bandpassFreq || highpass;
-      filter.Q.value = bandpassFreq ? 2.5 : 0.8;
-      gain.gain.setValueAtTime(0.0001, t0);
-      gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), t0 + attack);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
-      src.connect(filter);
-      filter.connect(gain);
-      gain.connect(out);
-      src.start(t0);
-      src.stop(t0 + duration + 0.08);
-      sources.push(src);
-      return src;
-    };
-
-    switch (voice.id) {
-      case "kick":
-        startOsc("sine", 56 * pitch * (0.85 + tone * 0.25), 0.36 * decayScale, 1.35, 32 * pitch, 0.001);
-        startOsc("sine", 118 * pitch, 0.035 + punch * 0.035, 0.24 * punch, 72 * pitch, 0.001);
-        if (noiseLevel > 0.02) startNoise(0.024 + punch * 0.025, 0.12 * noiseLevel, 1800);
-        break;
-      case "snare":
-        startOsc("triangle", 172 * pitch, 0.16 * decayScale, 0.42, 132 * pitch, 0.001);
-        startOsc("triangle", 255 * pitch, 0.09 * decayScale, 0.24, 210 * pitch, 0.001);
-        startNoise(0.16 + 0.22 * decayScale, 0.8 * noiseLevel * (0.55 + kit.snap * 0.8), 1600);
-        break;
-      case "clap":
-        [0, 0.018, 0.036].forEach(offset => {
-          const prevT = t0;
-          const src = ctx.createBufferSource();
-          const filter = ctx.createBiquadFilter();
-          const gain = ctx.createGain();
-          src.buffer = createNoiseBuffer(ctx, 0.18);
-          filter.type = "bandpass";
-          filter.frequency.value = 1350 + tone * 1000;
-          filter.Q.value = 1.6;
-          gain.gain.setValueAtTime(0.0001, prevT + offset);
-          gain.gain.exponentialRampToValueAtTime(0.26 * noiseLevel, prevT + offset + 0.002);
-          gain.gain.exponentialRampToValueAtTime(0.0001, prevT + offset + 0.055 + kit.snap * 0.06);
-          src.connect(filter);
-          filter.connect(gain);
-          gain.connect(out);
-          src.start(prevT + offset);
-          src.stop(prevT + offset + 0.16);
-          sources.push(src);
-        });
-        startNoise(0.42 * decayScale, 0.22 * noiseLevel, 1800);
-        break;
-      case "rimshot":
-        startOsc("square", 720 * pitch, 0.055, 0.42, 520 * pitch, 0.001);
-        startNoise(0.06 + kit.snap * 0.04, 0.34 * noiseLevel, 2600);
-        break;
-      case "closedHat":
-        startNoise(0.035 + kit.hatDecay * 0.12, 0.58 * noiseLevel, 6200 + tone * 2600);
-        startOsc("square", 8200 * pitch, 0.025, 0.08, 7800 * pitch, 0.001);
-        break;
-      case "openHat":
-        startNoise(0.16 + kit.hatDecay * 0.56, 0.5 * noiseLevel, 5200 + tone * 2200);
-        break;
-      case "cymbal":
-        startNoise(0.35 + kit.hatDecay * 0.8, 0.42 * noiseLevel, 4400 + tone * 2600);
-        startOsc("square", 6100 * pitch, 0.2 + kit.hatDecay * 0.22, 0.07, 5850 * pitch, 0.001);
-        break;
-      case "lowTom":
-      case "midTom":
-      case "highTom": {
-        const base = voice.id === "lowTom" ? 94 : voice.id === "midTom" ? 132 : 178;
-        startOsc("sine", base * pitch, (0.18 + kit.tomDecay * 0.42) * decayScale, 0.76, base * 0.58 * pitch, 0.001);
-        break;
-      }
-      case "cowbell": {
-        const tune = (kit.cowbellTune ?? 1) * pitch;
-        startOsc("square", 540 * tune, 0.13 + decayScale * 0.08, 0.36, 540 * tune, 0.001);
-        startOsc("square", 805 * tune, 0.11 + decayScale * 0.08, 0.3, 805 * tune, 0.001);
-        break;
-      }
-      case "claves":
-        startOsc("square", 1850 * pitch, 0.055 + kit.snap * 0.025, 0.38, 1850 * pitch, 0.001);
-        break;
-      default:
-        startNoise(0.1, 0.4 * noiseLevel, 2400);
-        break;
-    }
-
-    return sources;
+    return window.WAWDrums.trigger(ctx, destination, voice.id, velocity, kit, ctx.currentTime + Math.max(0, when));
   }
 
+  // White noise is generated once per AudioContext and reused. It used to be
+  // regenerated (sample by sample) for every drum hit / noisy synth note, which
+  // was a significant main-thread cost during playback and WAV export.
+  // Callers always stop their source explicitly, so a longer buffer is fine.
+  const noiseBufferCache = new WeakMap();
   function createNoiseBuffer(ctx, duration = 2) {
-    const buffer = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * duration)), ctx.sampleRate);
+    const needed = Math.max(1, Math.floor(ctx.sampleRate * Math.max(2, duration)));
+    const cached = noiseBufferCache.get(ctx);
+    if (cached && cached.length >= needed) return cached;
+    const buffer = ctx.createBuffer(1, needed, ctx.sampleRate);
     const data = buffer.getChannelData(0);
     for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+    noiseBufferCache.set(ctx, buffer);
     return buffer;
   }
 
@@ -6960,91 +6411,21 @@ if (loopBarCanvas) {
       schedule808Hit(startSec, midiNote, velocity, noteMeta);
       return;
     }
+    if (noteMeta.instrument === "sampler") {
+      const ctx = ensureAudioContext();
+      const track = tracks.find(t => t.id === noteMeta.trackId);
+      const srcs = window.WAWSampler?.scheduleNote(ctx, window.WAWMixer.getTrackInput(noteMeta.trackId), track, midiNote, velocity,
+        ctx.currentTime + startSec, ctx.currentTime + endSec) || [];
+      trackScheduledSources(srcs);
+      return;
+    }
 
     const ctx = ensureAudioContext();
-    const patch = { ...createDefaultSynthPatch(), ...(noteMeta.synthPatch || synthState) };
     const now = ctx.currentTime;
-    const t0 = now + startSec;
-    const t1 = now + endSec;
-
-    const osc = ctx.createOscillator();
-    osc.type = getInstrumentWave(noteMeta.instrument, patch);
-    osc.frequency.value = midiToHz(midiNote);
-    osc.detune.value = patch.detune ?? 0;
-    const sources = [osc];
-
-    const g = ctx.createGain();
-    const trackGain = noteMeta.trackVolume ?? 1;
-    const velGain = Math.max(0.05, velocity / 127) * trackGain * patch.gain;
-    const A = patch.attack;
-    const D = patch.decay;
-    const S = patch.sustain;
-    const R = patch.release;
-
-    const peak = velGain;
-    const sustainLevel = velGain * S;
-
-    const env = g.gain;
-    env.setValueAtTime(0, t0);
-    env.linearRampToValueAtTime(peak, t0 + A);
-    env.linearRampToValueAtTime(sustainLevel, t0 + A + D);
-    env.setValueAtTime(sustainLevel, t1);
-    env.linearRampToValueAtTime(0, t1 + R);
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = "lowpass";
-    const cutoff = patch.cutoff;
-    const envPeak = Math.max(80, Math.min(16000, cutoff + (patch.filterEnv ?? 0)));
-    filter.frequency.setValueAtTime(cutoff, t0);
-    filter.frequency.linearRampToValueAtTime(envPeak, t0 + (patch.filterAttack ?? 0.01));
-    filter.frequency.linearRampToValueAtTime(cutoff, t0 + (patch.filterAttack ?? 0.01) + (patch.filterDecay ?? 0.25));
-    filter.Q.value = patch.filterQ ?? 0.8;
-
-    osc.connect(g);
-    if (patch.osc2Wave && patch.osc2Wave !== "off" && (patch.osc2Mix ?? 0) > 0.001) {
-      const osc2 = ctx.createOscillator();
-      const osc2Gain = ctx.createGain();
-      osc2.type = patch.osc2Wave;
-      osc2.frequency.value = midiToHz(midiNote);
-      osc2.detune.value = (patch.detune ?? 0) + (patch.osc2Detune ?? 0);
-      osc2Gain.gain.value = patch.osc2Mix;
-      osc2.connect(osc2Gain);
-      osc2Gain.connect(g);
-      osc2.start(t0);
-      osc2.stop(t1 + R + 0.05);
-      sources.push(osc2);
-    }
-
-    if ((patch.noise ?? 0) > 0.001) {
-      const noise = ctx.createBufferSource();
-      const noiseGain = ctx.createGain();
-      noise.buffer = createNoiseBuffer(ctx, Math.max(0.05, endSec - startSec + R + 0.1));
-      noiseGain.gain.value = patch.noise;
-      noise.connect(noiseGain);
-      noiseGain.connect(g);
-      noise.start(t0);
-      noise.stop(t1 + R + 0.05);
-      sources.push(noise);
-    }
-
-    if ((patch.lfoRate ?? 0) > 0.001 && (patch.lfoAmount ?? 0) > 0.001) {
-      const lfo = ctx.createOscillator();
-      const lfoGain = ctx.createGain();
-      lfo.frequency.value = patch.lfoRate;
-      lfoGain.gain.value = patch.lfoAmount;
-      lfo.connect(lfoGain);
-      lfoGain.connect(patch.lfoTarget === "filter" ? filter.frequency : osc.detune);
-      lfo.start(t0);
-      lfo.stop(t1 + R + 0.05);
-      sources.push(lfo);
-    }
-
-    g.connect(filter);
-    connectSynthOutput(ctx, filter, synthMasterGain, patch, noteMeta.trackPan ?? 0);
-
-    osc.start(t0);
-    osc.stop(t1 + R + 0.05);
-    scheduledOscs.push(...sources);
+    const dest = window.WAWMixer?.getTrackInput(noteMeta.trackId) || synthMasterGain;
+    const patch = noteMeta.synthPatch || synthState;
+    const voice = window.WAWSynth.buildSynthVoice(ctx, dest, midiNote, velocity, patch, now + startSec, now + endSec);
+    trackScheduledSources(voice.sources);
   }
 
   function getActivePlaybackLoop() {
@@ -7074,7 +6455,8 @@ if (loopBarCanvas) {
   }
 
   function playNotes(noteArray) {
-  if (!noteArray.length) {
+  const hasAudio = (window.WAWAudio?.collectAudioEvents(0, Infinity) || []).length > 0;
+  if (!noteArray.length && !hasAudio) {
     statusEl.textContent = "No notes to play.";
     return;
   }
@@ -7119,7 +6501,96 @@ function clearScheduledNodes() {
     try { node.stop(0); } catch (e) {}
     try { node.disconnect(); } catch (e) {}
   });
-  scheduledOscs = [];
+  scheduledOscs.clear();
+}
+
+// ---------- LOOKAHEAD SCHEDULER ----------
+// Notes used to be turned into Web Audio nodes for the WHOLE range at once when
+// playback started (thousands of nodes for a long song), and loop restarts were
+// driven by requestAnimationFrame, which added up to a frame of jitter at every
+// loop boundary and stopped looping when the tab was in the background.
+// Now notes are scheduled ~200 ms ahead from a timer, consecutive loop cycles are
+// placed sample-accurately back to back, and mute/solo/volume/pan/patch are read
+// from the live track state when each note is scheduled, so mixer changes are
+// heard almost immediately instead of on the next loop.
+const SCHED_LOOKAHEAD_SEC = 0.2;
+const SCHED_INTERVAL_MS = 25;
+let schedTimerId = null;
+let schedCycle = null;    // cycle currently being scheduled (may start in the future)
+let displayCycle = null;  // cycle the playhead is currently in
+
+function isTrackAudible(track) {
+  if (!track || track.mute) return false;
+  const anySolo = tracks.some(t => t.solo);
+  return !anySolo || !!track.solo;
+}
+
+function buildPlaybackCycle(noteArray, rangeStart, rangeEnd, startTime) {
+  const noteEvents = noteArray
+    .filter(n => n.endSec > n.startSec && n.endSec > rangeStart && n.startSec < rangeEnd)
+    .map(n => ({ note: n, ns: Math.max(n.startSec, rangeStart), ne: Math.min(n.endSec, rangeEnd) }))
+    .filter(e => e.ne > e.ns);
+  // audio-track clips are scheduled by the same clock
+  const audioEvents = (window.WAWAudio?.collectAudioEvents(rangeStart, rangeEnd) || [])
+    .map(ev => ({ audio: ev, ns: ev.start, ne: ev.end }));
+  const queue = [...noteEvents, ...audioEvents].sort((a, b) => a.ns - b.ns);
+  return { startTime, rangeStart, rangeEnd, queue, index: 0 };
+}
+
+function getLiveMixdownForScheduling() {
+  // include muted / non-soloed tracks: audibility is decided per note at schedule time
+  return getAllNotesMixdown({ includeMuted: true, ignoreSolo: true });
+}
+
+function schedulerTick() {
+  if (!isPlaying || !audioCtx || !schedCycle) return;
+  const now = audioCtx.currentTime;
+  const horizon = now + SCHED_LOOKAHEAD_SEC;
+  const trackById = new Map(tracks.map(t => [t.id, t]));
+
+  // guard against pathological loops (e.g. a tiny loop range)
+  for (let guard = 0; guard < 64; guard++) {
+    const c = schedCycle;
+    while (c.index < c.queue.length) {
+      const e = c.queue[c.index];
+      const absStart = c.startTime + (e.ns - c.rangeStart);
+      if (absStart > horizon) break;
+      c.index++;
+      const absEnd = c.startTime + (e.ne - c.rangeStart);
+      if (absEnd <= now) continue; // too late (e.g. after a long stall)
+      if (e.audio) {
+        const track = trackById.get(e.audio.trackId);
+        if (!isTrackAudible(track)) continue;
+        // started late (e.g. playback began mid-clip): skip into the audio
+        const late = Math.max(0, now - absStart);
+        trackScheduledSources(window.WAWAudio.scheduleAudioEvent(audioCtx, window.WAWMixer.getTrackInput(track), e.audio, absStart, late));
+        continue;
+      }
+      const track = trackById.get(e.note.trackId);
+      if (track && !isTrackAudible(track)) continue;
+      const meta = track ? normalizePlaybackNote(e.note, track) : e.note;
+      scheduleSynthNote(absStart - now, absEnd - now, meta.midiNote, meta.velocity, meta);
+    }
+    if (c.index < c.queue.length) break;
+
+    // current cycle fully scheduled -> queue the next loop cycle when it gets close
+    const cycleEnd = c.startTime + Math.max(0.05, c.rangeEnd - c.rangeStart);
+    if (cycleEnd > horizon) break;
+    const loop = getActivePlaybackLoop();
+    const hasLoop = loop.enabled && loop.end > loop.start + 0.05;
+    if (!hasLoop) break;
+    schedCycle = buildPlaybackCycle(getLiveMixdownForScheduling(), loop.start, loop.end, cycleEnd);
+  }
+
+  // Non-looping playback ended (also works while the tab is in the background,
+  // where requestAnimationFrame does not run)
+  const dc = displayCycle;
+  if (dc && schedCycle === dc && dc.index >= dc.queue.length) {
+    const end = dc.startTime + Math.max(0.05, dc.rangeEnd - dc.rangeStart);
+    const loop = getActivePlaybackLoop();
+    const hasLoop = loop.enabled && loop.end > loop.start + 0.05;
+    if (!hasLoop && now >= end && !isRecording) stopPlayback();
+  }
 }
 
 function startPlaybackCycle(noteArray, startAtSec = null, isLoopRestart = false) {
@@ -7136,13 +6607,11 @@ function startPlaybackCycle(noteArray, startAtSec = null, isLoopRestart = false)
   const activeLoop = getActivePlaybackLoop();
   const hasActiveLoop = activeLoop.enabled && (activeLoop.end > activeLoop.start + 0.05);
 
-  const rangeStartDefault = hasActiveLoop ? activeLoop.start : 0;
-  const rangeEndDefault   = hasActiveLoop ? activeLoop.end   : totalDur;
+  let rangeStart = hasActiveLoop ? activeLoop.start : 0;
+  let rangeEnd   = hasActiveLoop ? activeLoop.end   : totalDur;
 
-  let rangeStart = rangeStartDefault;
-  let rangeEnd   = rangeEndDefault;
-
-  if (startAtSec != null && !isLoopRestart && !isRecording) {
+  // (also while recording: background playback must start where the take starts)
+  if (startAtSec != null && !isLoopRestart) {
     rangeStart = startAtSec;
     if (hasActiveLoop) {
       if (rangeStart < activeLoop.start || rangeStart >= activeLoop.end) {
@@ -7160,19 +6629,18 @@ function startPlaybackCycle(noteArray, startAtSec = null, isLoopRestart = false)
   playbackStartTime = audioCtx.currentTime;
   lastMetroBeatIndex = null;
 
-  const sorted = [...noteArray]
-    .filter(n => n.endSec > n.startSec && n.endSec > rangeStart && n.startSec < rangeEnd)
-    .sort((a, b) => a.startSec - b.startSec);
+  // noteArray is kept for API compatibility; live track state is used so that
+  // mute/solo changes made during playback take effect.
+  void noteArray;
+  schedCycle = buildPlaybackCycle(getLiveMixdownForScheduling(), rangeStart, rangeEnd, playbackStartTime);
+  displayCycle = schedCycle;
 
-  sorted.forEach(n => {
-    const ns = Math.max(n.startSec, rangeStart);
-    const ne = Math.min(n.endSec, rangeEnd);
-    if (ne <= ns) return;
-    scheduleSynthNote(ns - rangeStart, ne - rangeStart, n.midiNote, n.velocity, n);
-  });
+  if (schedTimerId) clearInterval(schedTimerId);
+  schedTimerId = setInterval(schedulerTick, SCHED_INTERVAL_MS);
+  schedulerTick();
 
   if (!isLoopRestart) {
-    animatePlayhead();
+    requestAnimationFrame(animatePlayhead);
   }
 }
 
@@ -7186,21 +6654,40 @@ function updateSequencerPlayhead(sec) {
   const leftPx = (seqGridLabelW || 0) + xPx - (sequencerGrid?.scrollLeft || 0);
 
   seqPlayheadEl.style.left = leftPx + "px";
-  drawSequencerRuler(sec);
 }
 
-
+// Redraw only what is visible: the piano roll / velocity lane are skipped
+// unless the editor is open (they used to be repainted every frame regardless,
+// along with the loop bars up to three times per frame).
+function drawTransportFrame(songPos) {
+  if (songPos != null) lastPlayheadSec = songPos;
+  if (currentView === "editor") {
+    drawPianoRoll(songPos);   // also draws both loop bars
+    drawVelocityLane();
+  } else {
+    drawAllLoopBars(songPos);
+  }
+  if (songPos != null) updateSequencerPlayhead(songPos);
+}
 
 function animatePlayhead() {
   if (!isPlaying || !audioCtx) {
-    drawPianoRoll(null);
-    drawVelocityLane();
-    if (loopBarCanvas) drawAllLoopBars(null);
+    drawTransportFrame(null);
     return;
   }
 
   const now = audioCtx.currentTime;
-  const elapsed = now - playbackStartTime;
+
+  // move on to the next (already scheduled) loop cycle once it has started
+  if (schedCycle && schedCycle !== displayCycle && now >= schedCycle.startTime) {
+    displayCycle = schedCycle;
+    playbackStartTime = displayCycle.startTime;
+    playbackRangeStartSec = displayCycle.rangeStart;
+    playbackRangeEndSec = displayCycle.rangeEnd;
+    lastMetroBeatIndex = null;
+  }
+
+  const elapsed = Math.max(0, now - playbackStartTime);
   const rangeDur = Math.max(playbackRangeEndSec - playbackRangeStartSec, 0.05);
 
   const bpm = parseFloat(bpmInput.value) || timelineBpm || 120;
@@ -7208,25 +6695,8 @@ function animatePlayhead() {
     metronomeTickIfNeeded(elapsed, bpm, false);
   }
 
-  if (elapsed >= rangeDur) {
-    const activeLoop = getActivePlaybackLoop();
-    const hasActiveLoop = activeLoop.enabled && activeLoop.end > activeLoop.start + 0.05;
-
-    if (hasActiveLoop) {
-      startPlaybackCycle(getAllNotesMixdown(), activeLoop.start, true);
-    } else {
-      stopPlayback();
-    }
-    return;
-  }
-
-  const songPos = playbackRangeStartSec + elapsed;
-  lastPlayheadSec = songPos;  
-
-  drawPianoRoll(songPos);
-  drawVelocityLane();
-  if (loopBarCanvas) drawAllLoopBars(songPos);
-  updateSequencerPlayhead(songPos);
+  const songPos = playbackRangeStartSec + Math.min(elapsed, rangeDur);
+  drawTransportFrame(songPos);
   requestAnimationFrame(animatePlayhead);
 }
 
@@ -7234,9 +6704,7 @@ function animatePlayhead() {
 function animateRecordingTransport() {
   if (!isRecording || !audioCtx) {
     recordAnimId = null;
-    drawPianoRoll(null);
-    drawVelocityLane();
-    if (loopBarCanvas) drawAllLoopBars(null);
+    drawTransportFrame(null);
     return;
   }
 
@@ -7253,13 +6721,8 @@ function animateRecordingTransport() {
 
   followRecordingPlayhead(songPos);
 
-  lastPlayheadSec = songPos;
-  drawPianoRoll(songPos);
-  drawVelocityLane();
-  if (loopBarCanvas) drawAllLoopBars(songPos);
-
+  drawTransportFrame(songPos);
   updateLiveRecordingClip(songPos);
-  updateSequencerPlayhead(songPos);
 
   recordAnimId = requestAnimationFrame(animateRecordingTransport);
 }
@@ -7270,21 +6733,20 @@ function animateRecordingTransport() {
       clearTimeout(playbackLoopTimerId);
       playbackLoopTimerId = null;
     }
-    if (!isPlaying && !scheduledOscs.length) {
-      drawPianoRoll(null);
-      drawVelocityLane();
-      if (loopBarCanvas) drawAllLoopBars(null);
+    if (schedTimerId) {
+      clearInterval(schedTimerId);
+      schedTimerId = null;
+    }
+    schedCycle = null;
+    displayCycle = null;
+    if (!isPlaying && !scheduledOscs.size) {
+      drawTransportFrame(null);
       return;
     }
     isPlaying = false;
     if (stopBtn) stopBtn.disabled = true;
-    scheduledOscs.forEach(osc => {
-      try { osc.stop(0); } catch (e) {}
-    });
-    scheduledOscs = [];
-    drawPianoRoll(null);
-    drawVelocityLane();
-    if (loopBarCanvas) drawAllLoopBars(null);
+    clearScheduledNodes();
+    drawTransportFrame(null);
   }
 
   // ---------- QUANTIZE / HUMANIZE ----------
@@ -7557,7 +7019,14 @@ function animateRecordingTransport() {
     } else {
       projects.unshift(item);
     }
-    writeProjectLibrary(projects);
+    try {
+      writeProjectLibrary(projects);
+    } catch (e) {
+      // e.g. QuotaExceededError — don't pretend the save worked
+      console.error("Project library write failed:", e);
+      statusEl.textContent = "Could not save to the project library (browser storage full?). Use Save to export a JSON file.";
+      return null;
+    }
     setActiveProject(item);
     renderProjectsLibrary();
     if (!silent) {
@@ -7578,8 +7047,9 @@ function animateRecordingTransport() {
     const payload = getProjectPayload();
     const signature = getProjectSaveSignature(payload);
     if (signature === lastProjectSaveSignature) return;
-    saveProjectToLibrary(null, { silent: true, autoSave: true });
-    statusEl.textContent = `Auto-saved "${activeProjectName || "project"}".`;
+    if (saveProjectToLibrary(null, { silent: true, autoSave: true })) {
+      statusEl.textContent = `Auto-saved "${activeProjectName || "project"}".`;
+    }
   }
 
   setInterval(autoSaveActiveProject, PROJECT_AUTO_SAVE_INTERVAL_MS);
@@ -7600,14 +7070,14 @@ function animateRecordingTransport() {
     projectsList.innerHTML = projects.map(item => {
       const date = item.savedAt ? new Date(item.savedAt).toLocaleString() : "Unknown date";
       return `
-        <article class="project-card" data-project-id="${item.id}">
+        <article class="project-card" data-project-id="${escapeHtml(item.id)}">
           <div class="project-card-main">
-            <h3>${item.name || "Untitled Project"}</h3>
+            <h3>${escapeHtml(item.name || "Untitled Project")}</h3>
             <span>${date}</span>
           </div>
           <div class="project-meta">
-            <span>${item.bpm || 120} BPM</span>
-            <span>${item.trackCount || 0} tracks</span>
+            <span>${Number(item.bpm) || 120} BPM</span>
+            <span>${Number(item.trackCount) || 0} tracks</span>
           </div>
           <div class="project-card-actions">
             <button type="button" data-action="load">Load</button>
@@ -7636,9 +7106,11 @@ function animateRecordingTransport() {
       renderSequencer();
       statusEl.textContent = `Loaded "${item.name}".`;
     } else if (action === "export") {
-      const blob = new Blob([JSON.stringify(item.payload, null, 2)], { type: "application/json" });
-      const safeName = (item.name || "easydaw-project").replace(/[^a-zA-Z0-9._-]+/g, "_");
-      downloadBlob(blob, `${safeName}.json`);
+      exportPayloadWithSamples(item.payload).then(full => {
+        const blob = new Blob([JSON.stringify(full)], { type: "application/json" });
+        const safeName = (item.name || "waw-project").replace(/[^a-zA-Z0-9._-]+/g, "_");
+        downloadBlob(blob, `${safeName}.json`);
+      });
     } else if (action === "delete") {
       if (!confirm(`Delete "${item.name}" from the local project library?`)) return;
       writeProjectLibrary(projects.filter(p => p.id !== id));
@@ -7649,7 +7121,7 @@ function animateRecordingTransport() {
 
   function getProjectPayload() {
     return {
-      app: "EasyDAW",
+      app: "WAW",
       version: 1,
       id: activeProjectId || undefined,
       name: activeProjectName || undefined,
@@ -7663,18 +7135,34 @@ function animateRecordingTransport() {
     };
   }
 
-  function saveProjectFile() {
+  // Embed every referenced sample (base64 WAV) so the JSON file is self-contained
+  async function exportPayloadWithSamples(payload) {
+    const projTracks = payload?.project?.tracks || [];
+    const ids = window.WAWSampler ? [...window.WAWSampler.sampleIdsInUse(projTracks)] : [];
+    if (!ids.length) return payload;
+    statusEl.textContent = `Packing ${ids.length} audio sample(s)…`;
+    return { ...payload, samples: await window.WAWSamples.exportSamples(ids) };
+  }
+
+  async function saveProjectFile() {
     saveProjectToLibrary();
-    const payload = getProjectPayload();
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-    const bpm = payload.bpm;
-    downloadBlob(blob, `easydaw-project_${bpm}bpm.json`);
-    statusEl.textContent = "Project saved to library and exported as JSON.";
+    const payload = await exportPayloadWithSamples(getProjectPayload());
+    const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+    const safeName = (activeProjectName || "waw-project").replace(/[^a-zA-Z0-9._-]+/g, "_");
+    downloadBlob(blob, `${safeName}_${payload.bpm}bpm.json`);
+    statusEl.textContent = "Project saved to library and exported as JSON (including audio).";
   }
 
   function loadProjectPayload(payload) {
     const project = payload.project || payload;
+    stopPlayback();
     restoreSnapshot(project);
+    // Undo steps from the previous project must not be applied to this one
+    undoStack = [];
+    redoStack = [];
+    activeClipId = null;
+    selectedClipRef = null;
+    updateUndoRedoButtons();
     if (payload.bpm && bpmInput) bpmInput.value = payload.bpm;
     if (payload.synthState && !tracks.some(t => t.synthPatch)) {
       const activeTrack = getActiveTrack();
@@ -7693,6 +7181,7 @@ function animateRecordingTransport() {
     renderSidebarTracks();
     renderSequencer();
     renderMixer();
+    window.WAWSampler?.preloadForTracks(tracks).then(() => renderSequencer());
     statusEl.textContent = "Project loaded.";
   }
 
@@ -7701,78 +7190,15 @@ function animateRecordingTransport() {
       render808NoteOffline(ctx, destination, note);
       return;
     }
-
+    if (note.instrument === "sampler") {
+      const track = tracks.find(t => t.id === note.trackId);
+      window.WAWSampler?.scheduleNote(ctx, destination, track, note.midiNote, note.velocity ?? 100,
+        Math.max(0, note.startSec), Math.max(note.startSec + 0.02, note.endSec));
+      return;
+    }
     const t0 = Math.max(0, note.startSec);
     const t1 = Math.max(t0 + 0.02, note.endSec);
-    const patch = { ...createDefaultSynthPatch(), ...(note.synthPatch || synthState) };
-    const osc = ctx.createOscillator();
-    osc.type = getInstrumentWave(note.instrument, patch);
-    osc.frequency.value = midiToHz(note.midiNote);
-    osc.detune.value = patch.detune ?? 0;
-    const sources = [osc];
-
-    const gain = ctx.createGain();
-    const filter = ctx.createBiquadFilter();
-    filter.type = "lowpass";
-    filter.frequency.setValueAtTime(patch.cutoff, t0);
-    filter.frequency.linearRampToValueAtTime(
-      Math.max(80, Math.min(16000, patch.cutoff + (patch.filterEnv ?? 0))),
-      t0 + (patch.filterAttack ?? 0.01)
-    );
-    filter.frequency.linearRampToValueAtTime(
-      patch.cutoff,
-      t0 + (patch.filterAttack ?? 0.01) + (patch.filterDecay ?? 0.25)
-    );
-    filter.Q.value = patch.filterQ ?? 0.8;
-
-    const velGain = Math.max(0.05, (note.velocity ?? 100) / 127) * (note.trackVolume ?? 1) * patch.gain;
-    const sustainLevel = velGain * patch.sustain;
-    gain.gain.setValueAtTime(0, t0);
-    gain.gain.linearRampToValueAtTime(velGain, t0 + patch.attack);
-    gain.gain.linearRampToValueAtTime(sustainLevel, t0 + patch.attack + patch.decay);
-    gain.gain.setValueAtTime(sustainLevel, t1);
-    gain.gain.linearRampToValueAtTime(0, t1 + patch.release);
-
-    osc.connect(gain);
-    if (patch.osc2Wave && patch.osc2Wave !== "off" && (patch.osc2Mix ?? 0) > 0.001) {
-      const osc2 = ctx.createOscillator();
-      const osc2Gain = ctx.createGain();
-      osc2.type = patch.osc2Wave;
-      osc2.frequency.value = midiToHz(note.midiNote);
-      osc2.detune.value = (patch.detune ?? 0) + (patch.osc2Detune ?? 0);
-      osc2Gain.gain.value = patch.osc2Mix;
-      osc2.connect(osc2Gain);
-      osc2Gain.connect(gain);
-      osc2.start(t0);
-      osc2.stop(t1 + patch.release + 0.05);
-      sources.push(osc2);
-    }
-    if ((patch.noise ?? 0) > 0.001) {
-      const noise = ctx.createBufferSource();
-      const noiseGain = ctx.createGain();
-      noise.buffer = createNoiseBuffer(ctx, Math.max(0.05, t1 - t0 + patch.release + 0.1));
-      noiseGain.gain.value = patch.noise;
-      noise.connect(noiseGain);
-      noiseGain.connect(gain);
-      noise.start(t0);
-      noise.stop(t1 + patch.release + 0.05);
-      sources.push(noise);
-    }
-    if ((patch.lfoRate ?? 0) > 0.001 && (patch.lfoAmount ?? 0) > 0.001) {
-      const lfo = ctx.createOscillator();
-      const lfoGain = ctx.createGain();
-      lfo.frequency.value = patch.lfoRate;
-      lfoGain.gain.value = patch.lfoAmount;
-      lfo.connect(lfoGain);
-      lfoGain.connect(patch.lfoTarget === "filter" ? filter.frequency : osc.detune);
-      lfo.start(t0);
-      lfo.stop(t1 + patch.release + 0.05);
-      sources.push(lfo);
-    }
-    gain.connect(filter);
-    connectSynthOutput(ctx, filter, destination, patch, note.trackPan ?? 0);
-    osc.start(t0);
-    osc.stop(t1 + patch.release + 0.05);
+    window.WAWSynth.buildSynthVoice(ctx, destination, note.midiNote, note.velocity ?? 100, note.synthPatch || synthState, t0, t1);
   }
 
   function render808NoteOffline(ctx, destination, note) {
@@ -7782,37 +7208,40 @@ function animateRecordingTransport() {
       note.midiNote,
       note.velocity ?? 100,
       note.drum808Patch || drum808State,
-      Math.max(0, note.startSec),
-      note.trackPan ?? 0,
-      note.trackVolume ?? 1
+      Math.max(0, note.startSec)
     );
   }
 
   async function exportWavMixdown() {
     const mixNotes = getAllNotesMixdown();
-    if (!mixNotes.length) {
-      statusEl.textContent = "No notes to export yet.";
+    const audioEvents = window.WAWAudio?.collectAudioEvents(0, Infinity, { audibleOnly: true }) || [];
+    if (!mixNotes.length && !audioEvents.length) {
+      statusEl.textContent = "Nothing to export yet.";
       return;
     }
     statusEl.textContent = "Rendering WAV...";
     const sampleRateOut = 44100;
-    const tailSec = 1.5;
-    const duration = Math.max(...mixNotes.map(n => n.endSec)) + tailSec;
+    const tailSec = 2.5;
+    const lastEnd = Math.max(0, ...mixNotes.map(n => n.endSec), ...audioEvents.map(e => e.end));
+    const duration = lastEnd + tailSec;
     const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
     if (!OfflineCtx) {
       statusEl.textContent = "Offline WAV export is not supported in this browser.";
       return;
     }
     const offline = new OfflineCtx(2, Math.ceil(duration * sampleRateOut), sampleRateOut);
-    const master = offline.createGain();
-    master.gain.value = 0.85;
-    master.connect(offline.destination);
-    mixNotes.forEach(n => renderNoteOffline(offline, master, n));
+    // Same channel strips, inserts, sends and master chain as realtime playback
+    const graph = await window.WAWMixer.createOfflineGraph(offline);
+    await window.WAWSampler?.preloadForTracks(tracks);
+    mixNotes.forEach(n => renderNoteOffline(offline, graph.inputFor(n.trackId), n));
+    for (const ev of audioEvents) {
+      window.WAWAudio.scheduleAudioEvent(offline, graph.inputFor(ev.trackId), ev, ev.start, 0);
+    }
     const buffer = await offline.startRendering();
     const wav = audioBufferToWav(buffer);
     const bpm = parseFloat(bpmInput.value) || 120;
-    downloadBlob(new Blob([wav], { type: "audio/wav" }), `easydaw-mix_${bpm}bpm.wav`);
-    statusEl.textContent = `Exported WAV mixdown with ${mixNotes.length} note(s).`;
+    downloadBlob(new Blob([wav], { type: "audio/wav" }), `waw-mix_${bpm}bpm.wav`);
+    statusEl.textContent = `Exported WAV mixdown (${duration.toFixed(1)} s).`;
   }
 
   function audioBufferToWav(buffer) {
@@ -7879,6 +7308,7 @@ function animateRecordingTransport() {
   }
 
   function handleMIDIMessage(event) {
+    if (window.WAWWorkspace && !window.WAWWorkspace.acceptMidi(event)) return;
     const [status, data1, data2] = event.data;
     const cmd = status & 0xf0;
     const note = data1;
@@ -7923,20 +7353,9 @@ function animateRecordingTransport() {
     Semicolon: 16,
     Quote: 17
   };
-  const COMPUTER_808_KEY_MAP = {
-    KeyA: 36,
-    KeyS: 37,
-    KeyD: 38,
-    KeyF: 39,
-    KeyG: 42,
-    KeyH: 46,
-    KeyJ: 49,
-    KeyK: 56,
-    KeyQ: 75,
-    KeyW: 45,
-    KeyE: 47,
-    KeyR: 50
-  };
+  const COMPUTER_808_KEY_MAP = Object.fromEntries(PAD_KEY_CODES.map((code, i) => [code, DRUM_808_VOICES[i].note]));
+  // sampler pads respond to MIDI notes 36..51 (MPC bank A)
+  const COMPUTER_SAMPLER_KEY_MAP = Object.fromEntries(PAD_KEY_CODES.map((code, i) => [code, 36 + i]));
 
   function isTypingTarget(target) {
     const tag = (target?.tagName || "").toLowerCase();
@@ -7957,6 +7376,21 @@ function animateRecordingTransport() {
   window.addEventListener("keydown", (e) => {
     if (currentView !== "editor" && currentView !== "sequencer") return;
     if (isTypingTarget(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (document.querySelector(".modal-backdrop.visible:not(#synthModal):not(#drum808Modal):not(#samplerModal)")) return;
+
+    const activeInst = getActiveTrack()?.type === "audio" ? null : getActiveTrack()?.instrument;
+    if (activeInst === "808" || activeInst === "sampler") {
+      const padNote = (activeInst === "808" ? COMPUTER_808_KEY_MAP : COMPUTER_SAMPLER_KEY_MAP)[e.code];
+      if (padNote == null || e.repeat) return;
+      e.preventDefault();
+      if (activeInst === "808") { trigger808PadNote(padNote, e.shiftKey ? 127 : 112); return; }
+      // sampler: hold the key for gate / loop pads
+      if (activeComputerKeys.has(e.code)) return;
+      activeComputerKeys.set(e.code, { note: padNote, trackId: getActiveTrack()?.id || null });
+      midiNoteOn(padNote, e.shiftKey ? 127 : 110);
+      return;
+    }
+    if (getActiveTrack()?.type === "audio") return;
 
     if (e.code === "KeyZ") {
       e.preventDefault();
@@ -7969,14 +7403,6 @@ function animateRecordingTransport() {
       e.preventDefault();
       computerKeyboardOctave = Math.min(8, computerKeyboardOctave + 1);
       statusEl.textContent = `Keyboard octave: C${computerKeyboardOctave}`;
-      return;
-    }
-
-    if (getActiveTrack()?.instrument === "808") {
-      const drumNote = COMPUTER_808_KEY_MAP[e.code];
-      if (drumNote == null || e.repeat) return;
-      e.preventDefault();
-      trigger808PadNote(drumNote, 112);
       return;
     }
 
@@ -8103,104 +7529,28 @@ function animateRecordingTransport() {
     const trackId = track?.id || "active";
     const voiceKey = `${trackId}:${midiNote}`;
     synthVoiceOff(midiNote, trackId);
-    const patch = { ...createDefaultSynthPatch(), ...(track?.synthPatch || synthState) };
-    const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    osc.type = patch.wave;
-    const targetHz = midiToHz(midiNote);
+    const patch = window.WAWSynth.fullPatch(track?.synthPatch || synthState);
+    // mono mode: one voice per track, gliding from the previous note
+    if (patch.polyMode === "mono") {
+      [...synthVoices.keys()].filter(k => k.startsWith(trackId + ":")).forEach(k => {
+        synthVoiceOff(Number(k.split(":")[1]), trackId);
+      });
+    }
     const previousNote = synthLastNoteByTrack.get(trackId);
-    if ((patch.glide ?? 0) > 0.001 && Number.isFinite(previousNote)) {
-      osc.frequency.setValueAtTime(midiToHz(previousNote), now);
-      osc.frequency.exponentialRampToValueAtTime(targetHz, now + patch.glide);
-    } else {
-      osc.frequency.value = targetHz;
-    }
-    osc.detune.value = patch.detune ?? 0;
-    const sources = [osc];
-    const g = ctx.createGain();
-
-    const velGain = Math.max(0.05, velocity / 127) * patch.gain;
-    const peak = velGain;
-    const env = g.gain;
-    const A = patch.attack;
-    const D = patch.decay;
-    const S = patch.sustain;
-
-    env.cancelScheduledValues(now);
-    env.setValueAtTime(0, now);
-    env.linearRampToValueAtTime(peak, now + A);
-    env.linearRampToValueAtTime(peak * S, now + A + D);
-
-    const filter = ctx.createBiquadFilter();
-    filter.type = "lowpass";
-    const cutoff = patch.cutoff;
-    const envPeak = Math.max(80, Math.min(16000, cutoff + (patch.filterEnv ?? 0)));
-    filter.frequency.setValueAtTime(cutoff, now);
-    filter.frequency.linearRampToValueAtTime(envPeak, now + (patch.filterAttack ?? 0.01));
-    filter.frequency.linearRampToValueAtTime(cutoff, now + (patch.filterAttack ?? 0.01) + (patch.filterDecay ?? 0.25));
-    filter.Q.value = patch.filterQ ?? 0.8;
-
-    osc.connect(g);
-    if (patch.osc2Wave && patch.osc2Wave !== "off" && (patch.osc2Mix ?? 0) > 0.001) {
-      const osc2 = ctx.createOscillator();
-      const osc2Gain = ctx.createGain();
-      osc2.type = patch.osc2Wave;
-      if ((patch.glide ?? 0) > 0.001 && Number.isFinite(previousNote)) {
-        osc2.frequency.setValueAtTime(midiToHz(previousNote), now);
-        osc2.frequency.exponentialRampToValueAtTime(targetHz, now + patch.glide);
-      } else {
-        osc2.frequency.value = targetHz;
-      }
-      osc2.detune.value = (patch.detune ?? 0) + (patch.osc2Detune ?? 0);
-      osc2Gain.gain.value = patch.osc2Mix;
-      osc2.connect(osc2Gain);
-      osc2Gain.connect(g);
-      osc2.start(now);
-      sources.push(osc2);
-    }
-    if ((patch.noise ?? 0) > 0.001) {
-      const noise = ctx.createBufferSource();
-      const noiseGain = ctx.createGain();
-      noise.buffer = createNoiseBuffer(ctx, 2);
-      noise.loop = true;
-      noiseGain.gain.value = patch.noise;
-      noise.connect(noiseGain);
-      noiseGain.connect(g);
-      noise.start(now);
-      sources.push(noise);
-    }
-    if ((patch.lfoRate ?? 0) > 0.001 && (patch.lfoAmount ?? 0) > 0.001) {
-      const lfo = ctx.createOscillator();
-      const lfoGain = ctx.createGain();
-      lfo.frequency.value = patch.lfoRate;
-      lfoGain.gain.value = patch.lfoAmount;
-      lfo.connect(lfoGain);
-      lfoGain.connect(patch.lfoTarget === "filter" ? filter.frequency : osc.detune);
-      lfo.start(now);
-      sources.push(lfo);
-    }
-    g.connect(filter);
-    connectSynthOutput(ctx, filter, synthMasterGain, patch, track?.pan ?? 0);
-
-    osc.start(now);
+    const dest = window.WAWMixer?.getTrackInput(track) || synthMasterGain;
+    const voice = window.WAWSynth.buildSynthVoice(ctx, dest, midiNote, velocity, patch, ctx.currentTime, null, {
+      glideFrom: Number.isFinite(previousNote) ? previousNote : undefined
+    });
     synthLastNoteByTrack.set(trackId, midiNote);
-    synthVoices.set(voiceKey, { sources, gain: g, release: patch.release });
+    synthVoices.set(voiceKey, voice);
   }
 
   function synthVoiceOff(midiNote, trackId = getActiveTrack()?.id || "active") {
     const ctx = ensureAudioContext();
-    const now = ctx.currentTime;
     const voiceKey = `${trackId || "active"}:${midiNote}`;
     const voice = synthVoices.get(voiceKey);
     if (!voice) return;
-    const R = voice.release ?? synthState.release;
-    const env = voice.gain.gain;
-    env.cancelScheduledValues(now);
-    env.setValueAtTime(env.value, now);
-    env.linearRampToValueAtTime(0, now + R);
-    voice.sources?.forEach(source => {
-      try { source.stop(now + R + 0.02); } catch (e) {}
-    });
+    voice.stop(ctx.currentTime);
     synthVoices.delete(voiceKey);
   }
   
@@ -8236,8 +7586,11 @@ function animateRecordingTransport() {
         else if (action === "clipRename") renameClip(trackIndex, clipId);
         else if (action === "clipOpen") {
           setActiveTrack(trackIndex, { silent: true });
-          openClipInEditor(clipId);
+          if (tracks[trackIndex]?.clips?.find(c => c.id === clipId)?.audio) window.WAWAudio.openClipEditor(trackIndex, clipId);
+          else openClipInEditor(clipId);
         }
+        else if (action === "clipSplit") window.WAWWorkspace?.splitClipAt(trackIndex, clipId, lastPlayheadSec);
+        else if (action === "clipMute") window.WAWWorkspace?.toggleClipMute(trackIndex, clipId);
         else if (action === "clipSetLoop") setLoopToClip(trackIndex, clipId);
         else if (action === "clipClear") clearClipNotes(trackIndex, clipId);
         else if (action === "deleteClip") deleteClip(trackIndex, clipId);
@@ -8248,8 +7601,10 @@ function animateRecordingTransport() {
     });
   }
 
+  // Multitrack hotkeys (the only handler for these): Alt+N = new track, Alt+1..9 = select track
   document.addEventListener("keydown", (e) => {
-    if (!e.altKey) return;
+    if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.repeat) return;
+    if (isTypingTarget(e.target)) return;
 
     // Alt+N = new track
     if (e.code === "KeyN") {
