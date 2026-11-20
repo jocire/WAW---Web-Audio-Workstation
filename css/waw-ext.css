@@ -540,3 +540,9 @@ body[data-skin="ssl"] .sb-bar { background: #20251f; border-color: #3c433b; }
 #mainArea > .main-view.visible { min-height: 0; flex: 1 1 auto; }
 #mixerView.visible { display: flex; flex-direction: column; }
 #mixerView > .mixer-strips { flex: 1 1 auto; min-height: 0; height: auto; }
+
+/* per-track MIDI input */
+.track-midiin-row { display: flex; align-items: center; gap: 4px; }
+.track-midiin-row label { flex: none; }
+.track-midiin-row .track-midi-dev { flex: 1 1 auto; min-width: 0; }
+.track-midiin-row .track-midi-ch { flex: none; width: 72px; }

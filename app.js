@@ -181,7 +181,12 @@ function renderSequencer() {
     row.className = "seq-track-row" + (ti === activeTrackIndex ? " active" : "");
     row.dataset.trackIndex = ti;
 
-    const kindLabel = t.type === "audio" ? "Audio" : (t.instrument === "808" ? "Drums" : t.instrument === "sampler" ? "Sampler" : "Synth");
+    const kindBase = t.type === "audio" ? "Audio" : (t.instrument === "808" ? "Drums" : t.instrument === "sampler" ? "Sampler" : "Synth");
+    const mi = t.type !== "audio" ? t.midiIn : null;
+    const devName = mi && mi.device !== "all" && mi.device !== "keyboard"
+      ? ((midiAccess && [...midiAccess.inputs.values()].find(i => i.id === mi.device)?.name) || "MIDI").split(/\s+/)[0].slice(0, 10) : "";
+    const kindLabel = kindBase + (mi && (mi.device !== "all" || mi.channel !== "all")
+      ? ` · ${mi.device === "keyboard" ? "kbd" : devName}${mi.channel !== "all" ? (mi.device !== "all" ? " " : "") + "ch" + mi.channel : ""}` : "");
     row.classList.toggle("is-audio", t.type === "audio");
     row.classList.toggle("is-muted", !!t.mute);
     row.innerHTML = `
@@ -1928,6 +1933,13 @@ function addTrack(_e) {
     return TRACK_COLORS[i % TRACK_COLORS.length];
   }
 
+  function midiInputOptions(selected) {
+    const inputs = midiAccess ? [...midiAccess.inputs.values()] : [];
+    const opts = [["all", "All inputs"], ["keyboard", "Computer keyboard"], ...inputs.map(i => [i.id, i.name || "MIDI input"])];
+    if (selected && !opts.some(([v]) => v === selected)) opts.push([selected, "(disconnected device)"]);
+    return opts.map(([v, n]) => `<option value="${escapeHtml(v)}" ${v === selected ? "selected" : ""}>${escapeHtml(n)}</option>`).join("");
+  }
+
   function renderSidebarTracks() {
     ensureTracks();
 
@@ -1978,6 +1990,11 @@ function addTrack(_e) {
             <option value="808"     ${t.instrument==="808"?"selected":""}>Drum Synth</option>
             <option value="sampler" ${t.instrument==="sampler"?"selected":""}>Sampler (16 pads)</option>
           </select>
+        </div>
+        <div class="track-select-row track-midiin-row" title="Which MIDI input (and channel) this track listens to when armed or selected. Lets several players record different tracks at once.">
+          <label>MIDI In</label>
+          <select class="track-midi-dev">${midiInputOptions(t.midiIn?.device || "all")}</select>
+          <select class="track-midi-ch" aria-label="MIDI channel">${["all", ...Array.from({ length: 16 }, (_, k) => String(k + 1))].map(c => `<option value="${c}" ${String(t.midiIn?.channel || "all") === c ? "selected" : ""}>${c === "all" ? "Any ch" : "Ch " + c}</option>`).join("")}</select>
         </div>`}
 
         <div class="track-instrument-panel"></div>
@@ -2067,6 +2084,14 @@ function addTrack(_e) {
         updateTrackSidebarControls(i);
         toast(t.mono ? "Track set to MONO" : "Track set to STEREO");
       });
+
+      const devSel = row.querySelector(".track-midi-dev"), chSel = row.querySelector(".track-midi-ch");
+      const setMidiIn = () => {
+        t.midiIn = { device: devSel.value, channel: chSel.value === "all" ? "all" : Number(chSel.value) };
+        renderSequencer();
+      };
+      [devSel, chSel].forEach(sel => sel?.addEventListener("change", (e) => { e.stopPropagation(); setMidiIn(); releaseSelectFocus?.(e.currentTarget); }));
+      [devSel, chSel].forEach(sel => sel?.addEventListener("click", e => e.stopPropagation()));
 
       const instSel = row.querySelector(".track-instrument");
       instSel?.addEventListener("change", (e) => {
@@ -4176,13 +4201,17 @@ const multiMidiRec = {
     this.active = true;
     renderSequencer();
   },
-  noteOn(note, velocity) {
+  noteOn(note, velocity, targets = null) {
     const t = this.songNow();
-    this.items.forEach(it => { if (!it.held.has(note)) it.held.set(note, { start: t, vel: velocity || 100 }); });
+    this.items.forEach(it => {
+      if (targets && !targets.includes(it.track)) return;
+      if (!it.held.has(note)) it.held.set(note, { start: t, vel: velocity || 100 });
+    });
   },
-  noteOff(note, at = null) {
+  noteOff(note, at = null, trackIds = undefined) {
     const t = at ?? this.songNow();
     this.items.forEach(it => {
+      if (trackIds && !trackIds.includes(it.track.id)) return;
       const h = it.held.get(note);
       if (!h) return;
       it.held.delete(note);
@@ -7543,8 +7572,10 @@ function animateRecordingTransport() {
     midiAccess.onstatechange = (e) => {
       if (e.port.type === "input") {
         e.port.onmidimessage = handleMIDIMessage;
+        renderSidebarTracks(); // per-track MIDI In menus list the devices
       }
     };
+    renderSidebarTracks();
     console.log("MIDI ready.");
   }
 
@@ -7561,11 +7592,12 @@ function animateRecordingTransport() {
     const vel = data2;
 
     const PM = window.WAWPadMap;
+    const src = { input: event.target?.id || "unknown", channel: (status & 0x0f) + 1 };
     if (cmd === 0x90 && vel > 0) {
-      if (PM?.handleMidiLearn(note)) return;           // pad MIDI Learn
-      midiNoteOn(PM ? PM.translate(note) : note, vel); // controller pad -> pad note
+      if (PM?.handleMidiLearn(note)) return;                // pad MIDI Learn
+      midiNoteOn(PM ? PM.translate(note) : note, vel, src); // controller pad -> pad note
     } else if (cmd === 0x80 || (cmd === 0x90 && vel === 0)) {
-      midiNoteOff(PM ? PM.translate(note) : note);
+      midiNoteOff(PM ? PM.translate(note) : note, undefined, src);
     }
   }
 
@@ -7684,18 +7716,36 @@ function animateRecordingTransport() {
    * track (each plays its own instrument instance), or the selected track when
    * no MIDI track is armed.
    */
-  function liveInputTracks() {
+  /**
+   * Per-track MIDI input: track.midiIn = { device: "all" | "keyboard" | <MIDI input id>,
+   * channel: "all" | 1..16 }. `src` describes where a note came from:
+   * { input: <MIDI input id>, channel: 1..16 } for MIDI devices, null for the
+   * computer keyboard / on-screen pads.
+   */
+  function midiInputMatches(track, src) {
+    const cfg = track.midiIn || {};
+    const device = cfg.device || "all", channel = cfg.channel || "all";
+    if (!src) return device === "all" || device === "keyboard";
+    if (device !== "all" && device !== src.input) return false;
+    return channel === "all" || Number(channel) === src.channel;
+  }
+  const midiSourceKey = (src, note) => (src ? `${src.input}#${src.channel}` : "kbd") + ":" + note;
+
+  function liveInputTracks(src = null) {
     const armed = tracks.filter(t => t.type !== "audio" && t.armed);
-    if (armed.length) return armed;
+    // with armed tracks, a note only goes to the armed tracks listening to its
+    // device / channel (another player's keyboard can feed another track)
+    if (armed.length) return armed.filter(t => midiInputMatches(t, src));
     const t = getActiveTrack();
-    return t ? [t] : [];
+    return t && midiInputMatches(t, src) ? [t] : [];
   }
 
-  function midiNoteOn(note, velocity) {
-    const targets = liveInputTracks();
+  function midiNoteOn(note, velocity, src = null) {
+    const targets = liveInputTracks(src);
     const trackIds = targets.map(t => t.id);
+    if (!targets.length) return; // nobody listens to this device / channel
     activeMidiKeys.add(note);
-    activePreviewNotes.set(note, trackIds);
+    activePreviewNotes.set(midiSourceKey(src, note), trackIds);
     updateChordFromActiveKeys();
 
     // Preview sound on every target track
@@ -7703,14 +7753,14 @@ function animateRecordingTransport() {
 
     // armed MIDI tracks record through the multi-track recorder
     if (isRecording && audioCtx && multiMidiRec.active) {
-      multiMidiRec.noteOn(note, velocity);
+      multiMidiRec.noteOn(note, velocity, targets);
       drawPianoRoll();
       drawVelocityLane();
       return;
     }
 
     // If we are recording, add / update a MIDI note in the piano roll.
-    if (isRecording && audioCtx) {
+    if (isRecording && audioCtx && targets.includes(getActiveTrack())) {
       const now = audioCtx.currentTime;
       let t = Math.max(0, now - recordingStartTime);
       let songSec = recordingBaseSec + t;
@@ -7732,14 +7782,20 @@ function animateRecordingTransport() {
     drawVelocityLane();
   }
 
-  function midiNoteOff(note, trackId = activePreviewNotes.get(note)) {
-  activeMidiKeys.delete(note);
-  activePreviewNotes.delete(note);
+  function midiNoteOff(note, trackId = undefined, src = null) {
+  const key = midiSourceKey(src, note);
+  const ids = trackId ?? activePreviewNotes.get(key);
+  if (ids === undefined && trackId === undefined && !activePreviewNotes.has(key)) {
+    // a note that was never routed anywhere (filtered device / channel)
+    if (!(isRecording && midiActiveNotes.has(note))) return;
+  }
+  activePreviewNotes.delete(key);
+  if (![...activePreviewNotes.keys()].some(k => k.endsWith(":" + note))) activeMidiKeys.delete(note);
   updateChordFromActiveKeys();
-  (Array.isArray(trackId) ? trackId : [trackId]).forEach(id => previewNoteOff(note, id));
+  (Array.isArray(ids) ? ids : [ids]).forEach(id => previewNoteOff(note, id));
 
   if (isRecording && audioCtx && multiMidiRec.active) {
-    multiMidiRec.noteOff(note);
+    multiMidiRec.noteOff(note, null, Array.isArray(ids) ? ids : undefined);
     drawPianoRoll();
     drawVelocityLane();
     return;
