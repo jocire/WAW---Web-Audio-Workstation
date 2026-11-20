@@ -6,6 +6,7 @@
   <title>WAW</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%8E%B9%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="css/waw-ext.css">
 </head>
 <body>
 <header>
@@ -116,6 +117,17 @@
         </div>
       </div>
     </div> <!-- End Key & Scale Panel-->
+
+    <!-- Audio input device / channels / latency (audio tracks + sampler recording) -->
+    <div class="panel" data-sidebar-for="sequencer,mixer,editor" id="audioInputPanel">
+      <div class="panel-header">
+        <h2>Audio Input</h2>
+        <span class="panel-toggle">▼</span>
+      </div>
+      <div class="panel-body">
+        <div class="subsection" id="audioInputSettings"></div>
+      </div>
+    </div>
 
     <!-- Input (Tuning + Noise/Gate + Mixer) -->
     <div class="panel" data-sidebar-for="editor" id="inputPanel">
@@ -287,6 +299,8 @@
   <button data-action="clipOpen">Open clip editor</button>
   <button data-action="clipSetLoop">Set loop to clip</button>
   <button data-action="clipClear">Clear clip notes</button>
+  <button data-action="clipSplit">Split at playhead (Ctrl+E)</button>
+  <button data-action="clipMute">Mute / unmute clip</button>
   <button data-action="deleteClip">Delete clip</button>
 </div>
 
@@ -419,6 +433,91 @@
               </div>
           </section>
           <section class="synth-section">
+            <div class="synth-section-title">Voice</div>
+              <div class="row-inline">
+                <label for="synthOsc1Octave">Osc 1 Oct</label>
+                <input type="range" id="synthOsc1Octave" data-synth-param="osc1Octave" min="-2" max="2" step="1" value="0">
+                <span class="synth-value" id="synthOsc1OctaveVal">0</span>
+              </div>
+              <div class="synth-row">
+                <label for="synthOsc2Mode">Osc 2 Mode</label>
+                <select id="synthOsc2Mode" data-synth-param="osc2Mode"><option value="mix">Mix</option><option value="fm">FM (2→1)</option><option value="ring">Ring mod</option></select>
+              </div>
+              <div class="row-inline">
+                <label for="synthOsc2Octave">Osc 2 Oct</label>
+                <input type="range" id="synthOsc2Octave" data-synth-param="osc2Octave" min="-2" max="2" step="1" value="0">
+                <span class="synth-value" id="synthOsc2OctaveVal">0</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthOsc2Semi">Osc 2 Semi</label>
+                <input type="range" id="synthOsc2Semi" data-synth-param="osc2Semi" min="-12" max="12" step="1" value="0">
+                <span class="synth-value" id="synthOsc2SemiVal">0</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthFmAmount">FM Amount</label>
+                <input type="range" id="synthFmAmount" data-synth-param="fmAmount" min="0" max="2" step="0.01" value="0.3">
+                <span class="synth-value" id="synthFmAmountVal">0.3</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthUnison">Unison</label>
+                <input type="range" id="synthUnison" data-synth-param="unison" min="1" max="7" step="1" value="1">
+                <span class="synth-value" id="synthUnisonVal">1</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthUnisonDetune">Uni Detune</label>
+                <input type="range" id="synthUnisonDetune" data-synth-param="unisonDetune" min="0" max="60" step="1" value="12">
+                <span class="synth-value" id="synthUnisonDetuneVal">12</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthUnisonSpread">Uni Width</label>
+                <input type="range" id="synthUnisonSpread" data-synth-param="unisonSpread" min="0" max="1" step="0.01" value="0.6">
+                <span class="synth-value" id="synthUnisonSpreadVal">0.6</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthSubLevel">Sub Osc</label>
+                <input type="range" id="synthSubLevel" data-synth-param="subLevel" min="0" max="1" step="0.01" value="0">
+                <span class="synth-value" id="synthSubLevelVal">0</span>
+              </div>
+              <div class="synth-row">
+                <label for="synthSubWave">Sub Wave</label>
+                <select id="synthSubWave" data-synth-param="subWave"><option value="sine">Sine</option><option value="square">Square</option><option value="triangle">Triangle</option></select>
+              </div>
+              <div class="synth-row">
+                <label for="synthPolyMode">Play Mode</label>
+                <select id="synthPolyMode" data-synth-param="polyMode"><option value="poly">Poly</option><option value="mono">Mono / Legato</option></select>
+              </div>
+          </section>
+          <section class="synth-section">
+            <div class="synth-section-title">Filter + Velocity</div>
+              <div class="synth-row">
+                <label for="synthFilterType">Filter Type</label>
+                <select id="synthFilterType" data-synth-param="filterType"><option value="lowpass">Low-pass</option><option value="highpass">High-pass</option><option value="bandpass">Band-pass</option><option value="notch">Notch</option></select>
+              </div>
+              <div class="synth-row">
+                <label for="synthFilterSlope">Slope</label>
+                <select id="synthFilterSlope" data-synth-param="filterSlope" data-numeric="true"><option value="12">12 dB/oct</option><option value="24">24 dB/oct</option></select>
+              </div>
+              <div class="row-inline">
+                <label for="synthKeyTrack">Key Track</label>
+                <input type="range" id="synthKeyTrack" data-synth-param="keyTrack" min="0" max="1" step="0.01" value="0.3">
+                <span class="synth-value" id="synthKeyTrackVal">0.3</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthVelSens">Vel → Amp</label>
+                <input type="range" id="synthVelSens" data-synth-param="velSens" min="0" max="1" step="0.01" value="0.8">
+                <span class="synth-value" id="synthVelSensVal">0.8</span>
+              </div>
+              <div class="row-inline">
+                <label for="synthVelToFilter">Vel → Filter</label>
+                <input type="range" id="synthVelToFilter" data-synth-param="velToFilter" min="0" max="1" step="0.01" value="0.2">
+                <span class="synth-value" id="synthVelToFilterVal">0.2</span>
+              </div>
+              <div class="synth-row">
+                <label for="synthLfoWave">LFO Wave</label>
+                <select id="synthLfoWave" data-synth-param="lfoWave"><option value="sine">Sine</option><option value="triangle">Triangle</option><option value="square">Square</option><option value="sawtooth">Saw</option></select>
+              </div>
+          </section>
+          <section class="synth-section">
             <div class="synth-section-title">Amp</div>
               <div class="row-inline">
                 <label for="synthAttack">Attack</label>
@@ -481,6 +580,8 @@
                 <select id="synthLfoTarget">
                   <option value="pitch">Pitch</option>
                   <option value="filter">Filter</option>
+                  <option value="amp">Amp (tremolo)</option>
+                  <option value="pan">Pan</option>
                 </select>
               </div>
               <div class="row-inline">
@@ -532,7 +633,7 @@
   <div id="drum808Modal" class="modal-backdrop drum808-modal">
     <div class="modal-dialog drum808-dialog">
       <div class="modal-header drum808-modal-header">
-        <span>808 Drum Machine</span>
+        <span>Drum Synth (analog modelling, no samples)</span>
         <button id="drum808ModalClose" type="button">×</button>
       </div>
       <div class="drum808-body">
@@ -554,6 +655,12 @@
           <div class="drum808-section-title">Pads</div>
           <div id="drum808ModalPads" class="drum808-panel"></div>
         </section>
+        <section class="drum808-section drum808-voice-section">
+          <div class="drum808-section-title">Selected Voice: <span id="drumVoiceName">Kick</span></div>
+          <div class="row-inline"><label for="drumVoiceTune">Tune</label><input type="range" id="drumVoiceTune" min="-12" max="12" step="0.1" value="0"><span class="synth-value" id="drumVoiceTuneVal">0.0</span></div>
+          <div class="row-inline"><label for="drumVoiceDecay">Decay</label><input type="range" id="drumVoiceDecay" min="0.2" max="3" step="0.01" value="1"><span class="synth-value" id="drumVoiceDecayVal">1.00</span></div>
+          <div class="row-inline"><label for="drumVoiceLevel">Level</label><input type="range" id="drumVoiceLevel" min="0" max="2" step="0.01" value="1"><span class="synth-value" id="drumVoiceLevelVal">1.00</span></div>
+        </section>
         <section class="drum808-section">
           <div class="drum808-section-title">Tone</div>
           <div class="row-inline"><label for="drum808Tone">Tone</label><input type="range" id="drum808Tone" min="0" max="1" step="0.01" value="1"><span class="synth-value" id="drum808ToneVal">1.00</span></div>
@@ -572,6 +679,7 @@
           <div class="drum808-section-title">Output</div>
           <div class="row-inline"><label for="drum808CowbellTune">Cow Tune</label><input type="range" id="drum808CowbellTune" min="0.5" max="1.6" step="0.01" value="1"><span class="synth-value" id="drum808CowbellTuneVal">1.00</span></div>
           <div class="row-inline"><label for="drum808Drive">Drive</label><input type="range" id="drum808Drive" min="0" max="1" step="0.01" value="0.12"><span class="synth-value" id="drum808DriveVal">0.12</span></div>
+          <div class="row-inline"><label for="drum808Stereo">Stereo</label><input type="range" id="drum808Stereo" min="0" max="1" step="0.01" value="0.5"><span class="synth-value" id="drum808StereoVal">0.50</span></div>
           <div class="row-inline"><label for="drum808Pan">Pan</label><input type="range" id="drum808Pan" min="-1" max="1" step="0.01" value="0"><span class="synth-value" id="drum808PanVal">0.00</span></div>
           <div class="row-inline"><label for="drum808Gain">Level</label><input type="range" id="drum808Gain" min="0" max="1.5" step="0.01" value="0.95"><span class="synth-value" id="drum808GainVal">0.95</span></div>
         </section>
@@ -580,6 +688,15 @@
   </div>
 
 <script src="app.js"></script>
+<script src="js/fx.js"></script>
+<script src="js/mixer.js"></script>
+<script src="js/synth.js"></script>
+<script src="js/drums.js"></script>
+<script src="js/samples.js"></script>
+<script src="js/sampler.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/workspace.js"></script>
+<script src="js/collab.js"></script>
 
 </body>
 </html>
