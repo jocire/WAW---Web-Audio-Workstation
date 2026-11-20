@@ -191,6 +191,7 @@ function renderSequencer() {
           <button type="button" class="tb-s ${t.solo ? "on" : ""}" data-tb="solo" title="Solo">S</button>
           <button type="button" class="tb-r ${t.armed ? "on" : ""}" data-tb="arm" title="Record arm">R</button>
           ${t.type === "audio" ? `<button type="button" class="tb-i ${t.monitor ? "on" : ""}" data-tb="monitor" title="Input monitoring">I</button>` : ""}
+          <button type="button" class="tb-a ${t.automation?.show ? "on" : ""} ${(t.automation?.lanes || []).some(l => l.points.length) ? "has" : ""}" data-tb="auto" title="Show automation lanes">A</button>
         </div>
       </div>
       <div class="seq-row-lane"></div>
@@ -6648,6 +6649,9 @@ function schedulerTick() {
     schedCycle = buildPlaybackCycle(getLiveMixdownForScheduling(), loop.start, loop.end, cycleEnd);
   }
 
+  // automation (read + write) at control rate
+  window.WAWAutomation?.tick(currentSongPos(), now);
+
   // Non-looping playback ended (also works while the tab is in the background,
   // where requestAnimationFrame does not run)
   const dc = displayCycle;
@@ -6657,6 +6661,16 @@ function schedulerTick() {
     const hasLoop = loop.enabled && loop.end > loop.start + 0.05;
     if (!hasLoop && now >= end && !isRecording) stopPlayback();
   }
+}
+
+/** song position (s) being heard right now, or null when stopped */
+function currentSongPos() {
+  if (!isPlaying || !audioCtx) return null;
+  const now = audioCtx.currentTime;
+  let c = displayCycle;
+  if (schedCycle && schedCycle !== c && now >= schedCycle.startTime) c = schedCycle;
+  if (!c) return null;
+  return c.rangeStart + Math.max(0, now - c.startTime);
 }
 
 function startPlaybackCycle(noteArray, startAtSec = null, isLoopRestart = false) {
@@ -6812,6 +6826,7 @@ function animateRecordingTransport() {
     isPlaying = false;
     if (stopBtn) stopBtn.disabled = true;
     clearScheduledNodes();
+    window.WAWAutomation?.onStop();
     drawTransportFrame(null);
   }
 
@@ -7315,6 +7330,7 @@ function animateRecordingTransport() {
     const offline = new OfflineCtx(2, Math.ceil(duration * sampleRateOut), sampleRateOut);
     // Same channel strips, inserts, sends and master chain as realtime playback
     const graph = await window.WAWMixer.createOfflineGraph(offline);
+    window.WAWAutomation?.applyOffline(offline, graph, duration);
     await window.WAWSampler?.preloadForTracks(tracks);
     mixNotes.forEach(n => renderNoteOffline(offline, graph.inputFor(n.trackId), n));
     for (const ev of audioEvents) {

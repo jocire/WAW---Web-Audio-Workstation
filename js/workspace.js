@@ -84,7 +84,12 @@
     copy.id = "trk_" + Math.random().toString(36).slice(2, 9);
     copy.name = t.name + " Copy";
     copy.clips = (copy.clips || []).map(c => ({ ...c, id: "clip_" + Math.random().toString(36).slice(2, 9) }));
-    (copy.inserts || []).forEach(fx => { fx.id = "fx_" + Math.random().toString(36).slice(2, 9); });
+    (copy.inserts || []).forEach(fx => {
+      const oldId = fx.id;
+      fx.id = "fx_" + Math.random().toString(36).slice(2, 9);
+      // automation lanes of the copied FX must point at the new instance
+      (copy.automation?.lanes || []).forEach(l => { if (l.param.startsWith(`fx.${oldId}.`)) l.param = l.param.replace(`fx.${oldId}.`, `fx.${fx.id}.`); });
+    });
     copy.solo = false; copy.armed = false; copy.monitor = false;
     tracks.splice(ti + 1, 0, normalizeTrack(copy, ti + 1));
     setActiveTrack(ti + 1, { silent: true });
@@ -140,6 +145,7 @@
 
   async function trackButton(t, kind) {
     if (kind === "arm") { toggleArm(t); return; }
+    if (kind === "auto") { window.WAWAutomation?.toggleShow(t); return; }
     if (kind === "monitor") {
       await window.WAWAudio.setMonitor(t, !t.monitor);
       refreshAll();

@@ -380,3 +380,20 @@ body.collab-open header, body.collab-open .app, body.collab-open .global-footer 
 .gl-flag.tempo { top: 20px; background: #facc15; }
 .gl-flag.sig { top: 37px; background: #93c5fd; }
 .seq-global-label .seq-label-top { font-size: 9.5px; line-height: 1.1; }
+
+/* ---------------- automation lanes ---------------- */
+.auto-row { min-height: 46px; height: 46px; }
+.auto-row .seq-row-label { background: #10131d; padding: 2px 4px; display: flex; flex-direction: column; gap: 2px; justify-content: center; }
+.auto-top { display: flex; gap: 3px; align-items: center; }
+.auto-top select, .auto-label .auto-param { font-size: 10px; padding: 0 2px; height: 18px; max-width: 100%; }
+.auto-top button { font-size: 11px; line-height: 14px; padding: 0 5px; }
+.auto-lane { position: relative; background: rgba(8, 10, 18, 0.9); border-top: 1px solid #1c2235; }
+.auto-svg { position: absolute; left: 0; top: 0; cursor: crosshair; }
+.auto-line { fill: none; stroke-width: 1.6; }
+.auto-fill { opacity: 0.12; }
+.auto-static { stroke: #64748b; stroke-dasharray: 4 4; }
+.auto-pt { fill: #fff; stroke: #0b0d14; stroke-width: 1; cursor: grab; }
+.auto-pt:hover { r: 5; }
+.auto-name { fill: #94a3b8; font: 10px system-ui; pointer-events: none; }
+.seq-label-btns .tb-a.on { background: #a855f7; color: #fff; }
+.seq-label-btns .tb-a.has:not(.on) { box-shadow: inset 0 -2px 0 #a855f7; }
