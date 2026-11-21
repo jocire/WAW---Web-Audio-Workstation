@@ -281,11 +281,10 @@
   const captures = new Map(); // owner id -> capture (keeps its input alive)
 
   /**
-   * Record from an input chain. Two recorders run side by side: the AudioWorklet
-   * recorder (sample-accurate) and a ScriptProcessor backup, because on some
-   * systems the worklet delivers no audio from a real device. stop() returns the
-   * buffer from whichever recorder actually received signal.
-   */
+   * Record from an input chain. Prefer AudioWorklet, but keep a ScriptProcessor
+   * fallback for browser/device combinations where the Worklet does not deliver
+   * input. Both paths overlap only during a short startup probe; the unused path
+   * is disconnected before the take continues.
   async function captureFrom(ti) {
     const ctx = ti.gain.context;
     const diag = {
@@ -337,9 +336,18 @@
       node = null;
     };
 
-    // Keep the legacy path alive only during a short startup probe. Some
-    // browser/device combinations have been observed not to deliver Worklet
-    // input; once the Worklet produces a data batch, the backup is discarded.
+    try {
+      const available = await window.WAWFX.ensureWorklets(ctx);
+      if (available) node = window.WAWFX.makeWorklet(ctx, "waw-recorder", {
+        numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
+        channelCount: 2, channelCountMode: "explicit"
+      });
+    } catch (e) {
+      console.warn("WAW recorder Worklet setup failed; using ScriptProcessor fallback.", e);
+    }
+
+    // Keep the legacy path alive only during the short data probe. Worklet
+    // module loading is complete before this overlap begins.
     try {
       sp = ctx.createScriptProcessor ? ctx.createScriptProcessor(4096, 2, 2) : null;
     } catch (e) { sp = null; }
@@ -360,16 +368,6 @@
       };
       ti.gain.connect(sp);
       sp.connect(sink);
-    }
-
-    try {
-      const available = await window.WAWFX.ensureWorklets(ctx);
-      if (available) node = window.WAWFX.makeWorklet(ctx, "waw-recorder", {
-        numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
-        channelCount: 2, channelCountMode: "explicit"
-      });
-    } catch (e) {
-      console.warn("WAW recorder Worklet setup failed; using ScriptProcessor fallback.", e);
     }
 
     if (node) {
