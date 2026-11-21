@@ -153,6 +153,66 @@ WAV export, so what you hear is what you export.
   video tiles, optional "follow others' play/stop". A joiner's previous project is backed
   up to the local library before the session state is adopted.
 
+## Performance and release readiness
+
+The following items are verification and hardening work identified during a static
+architecture review. They are **not claims that these problems have been reproduced**.
+Keep each item open until it has been tested on real browser/device combinations and
+the results are recorded.
+
+### Audio-engine hardening
+- [ ] Keep AudioWorklet as the normal recording path and use ScriptProcessor only as a
+  compatibility fallback; verify that both paths are never capturing the same stream.
+- [ ] Profile recorder buffer copies and allocations during long recordings; consider a
+  preallocated ring buffer or buffer pool if profiling shows avoidable GC pressure.
+- [ ] Define bounded buffering and backpressure behavior. Detect overruns and surface a
+  warning rather than silently losing or truncating recorded audio.
+- [ ] Stress the lookahead scheduler during main-thread stalls, background-tab throttling,
+  dense MIDI passages, loop boundaries and tempo-map changes; measure late or missed events.
+- [ ] Audit voice and audio-node lifecycle: stuck notes, voice stealing, disconnects,
+  repeated play/stop, track deletion and project replacement.
+- [ ] Check effect parameter changes and effect-graph rebuilds for clicks, especially
+  reverb and other effects that recreate internal nodes.
+- [ ] Verify AudioContext resume behavior, permission changes, device unplug/replug,
+  channel-count changes and differing input/output sample rates.
+
+### Performance and compatibility test matrix
+- [ ] Record a reproducible baseline: browser/version, OS, CPU, sample rate, audio device,
+  buffer/latency settings and power mode.
+- [ ] Measure representative 8/16/32/64-track sessions with instruments, samples,
+  automation and insert effects; record CPU, memory and audible dropouts.
+- [ ] Test 1/2/4-channel input recording for 10/30/60 minutes; verify duration, channel
+  alignment, continuity and absence of missing blocks.
+- [ ] Stress the UI while recording and playing; include background tabs and deliberate
+  main-thread stalls.
+- [ ] Instrument scheduler lateness, recorder overruns, peak memory and dropout counts.
+- [ ] Run cold-start and long-session checks in current Chrome, Edge and Firefox.
+- [ ] Publish measured, environment-specific limits instead of promising a universal
+  maximum track count.
+
+### Professional workflow and audio-quality gaps
+- [ ] Add punch-in/out ranges and input-FX monitoring/recording workflow.
+- [ ] Add a loopback-based recording-latency calibration flow; retain manual offset as
+  an override and document device-specific behavior.
+- [ ] Add multitrack MIDI export and stem export.
+- [ ] Add sidechain routing and bus/master/instrument automation.
+- [ ] Add loudness (LUFS) and true-peak metering.
+- [ ] Review the current limiter implementation with level-matched tests. Do not describe
+  it as transparent lookahead or true-peak limiting unless those properties are verified.
+- [ ] Document the absence of native VST3/AU hosting. A future browser instrument/FX module
+  API is a separate extension mechanism, not native plugin compatibility.
+
+### Release gates
+- [ ] Functional: core editing, instruments, mixer, automation, import/export and
+  collaboration smoke tests pass.
+- [ ] Audio integrity: long recordings and exports are checked for dropouts, clipping,
+  channel alignment and timing drift.
+- [ ] Performance: publish repeatable measurements and known operating limits.
+- [ ] Compatibility: record tested browser/OS/device combinations and known exclusions.
+- [ ] Data safety: verify project/sample backup, restore and destructive-edit recovery.
+- [ ] Release certification: complete manual hardware/device checks and document results;
+  passing automated or simulated tests alone does not certify a release.
+
 ## Known limitations
 
 - **Collab conflicts are resolved per part.** Two people changing the *same* part at the
@@ -181,29 +241,34 @@ WAV export, so what you hear is what you export.
 
 ## Next
 
-### Near term
-1. **Collab v3 — finer merges.** Per-clip / per-parameter units (or a CRDT such as
-   [Yjs](https://yjs.dev)) so concurrent edits on the same track merge too; soft locks
-   ("Bob is editing Clip 3") and remote cursors in the piano roll.
-2. **TURN fallback** for networks where peer-to-peer fails (configurable ICE servers).
-3. Tempo ramps and warp markers (elastic audio inside a clip).
-4. Bus/master automation; automation for instrument (synth/drum/sampler) parameters.
-5. Audio input: per-track input FX before recording, punch-in/out ranges.
-6. Comping for MIDI takes.
+### Near term — reliability before feature expansion
+1. **Recorder efficiency and integrity:** confirm one active capture path, profile copies
+   and allocations, add bounded buffering, overrun detection and long-recording tests.
+2. **Performance harness:** add repeatable multi-track playback/recording scenarios and
+   publish measured CPU, memory, scheduler-lateness and dropout results.
+3. **Audio lifecycle and device resilience:** audit voices/nodes and test context resume,
+   permissions, device changes, channel layouts and sample rates.
+4. **Recording workflow:** add punch-in/out and improve latency calibration; assess
+   input-FX monitoring.
+5. **Mixing/mastering verification:** validate limiter behavior and add LUFS/true-peak
+   metering before making mastering-quality claims.
 
-### Mid term
-7. **User management** (when a backend exists): accounts, project ownership,
-   invite-only rooms with roles (owner/editor/viewer), persistent cloud projects.
-   Candidate stacks: Supabase (Postgres + Realtime + Auth) or Firebase.
-8. Shared cloud sample library with deduplication (content hashes).
-9. Multitrack MIDI export (one track per WAW track, drums on channel 10) and stem export.
-10. Sidechain inputs for compressors (needs an AudioWorklet compressor).
-11. Plugin-style instrument API so new instruments/FX can be added as modules.
+### Mid term — production workflow
+6. Multitrack MIDI export and stem export.
+7. Sidechain routing; bus, master and instrument automation.
+8. Collab v3: finer per-clip/per-parameter merges, soft locks and remote cursors.
+9. TURN fallback for networks where peer-to-peer WebRTC fails.
+10. Tempo ramps, warp markers and MIDI take comping.
+11. Browser instrument/FX module API; explicitly separate this from native VST3/AU hosting.
 12. Mobile/touch layout for the console and pads.
+
+### Longer term — service-backed capabilities
+13. User management, project ownership, invite-only rooms with roles and persistent cloud
+    projects (requires a backend; Supabase or Firebase remain candidates).
+14. Shared cloud sample library with content-hash deduplication.
 
 ### Ideas
 - Play step patterns in sync with the song transport (pattern clips), and a step grid for
   the Sampler.
 - MIDI learn for knobs/faders; MCU/HUI control-surface support via Web MIDI.
-- Spectrum analyzer / loudness (LUFS) meter on the master.
 - Session recording of the collaboration chat into the project.
