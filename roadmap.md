@@ -192,6 +192,18 @@ proof that users are experiencing audible faults.
   backpressure and storage behavior; detect overruns and warn rather than silently losing
   or truncating audio. Evaluate streaming completed chunks to IndexedDB or another
   recoverable project store instead of retaining every chunk until Stop.
+
+#### Recorder refactor acceptance criteria
+- [ ] Choose the capture implementation deterministically; do not retain two complete
+  recordings for the full duration of a normal take. If a startup compatibility probe is
+  needed, keep it short and document how silent inputs are handled.
+- [ ] Preserve sample counts and channel alignment across start, stop, cancellation and
+  fallback; test mono devices, stereo devices and multiple armed tracks.
+- [ ] Keep waveform preview independent from ownership of the recorded audio buffers.
+- [ ] Measure peak memory during both capture and final AudioBuffer assembly, not only
+  steady-state recording; release temporary chunks after they are safely committed.
+- [ ] Verify cleanup after permission denial, device disconnect, Stop, Cancel, transport
+  stop and project/track removal.
 - [ ] Stress the lookahead scheduler during main-thread stalls, background-tab throttling,
   dense MIDI passages, loop boundaries and tempo-map changes; measure late or missed events.
 - [ ] Audit voice and audio-node lifecycle: stuck notes, voice stealing, disconnects,
