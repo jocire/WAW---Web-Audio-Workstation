@@ -316,7 +316,7 @@
         arr.push(mn, mx);
       }
     };
-    const stopBackup = () => {
+    const stopBackup = (discardProbeData = true) => {
       bRecording = false;
       if (sp) {
         try { ti.gain.disconnect(sp); sp.disconnect(); } catch (e) {}
@@ -324,8 +324,10 @@
         sp = null;
       }
       // The backup is needed only during the short compatibility probe.
-      bChunks[0].length = 0; bChunks[1].length = 0;
-      livePeaks.backup.length = 0;
+      if (discardProbeData) {
+        bChunks[0].length = 0; bChunks[1].length = 0;
+        livePeaks.backup.length = 0;
+      }
     };
     const stopWorklet = () => {
       if (!node) return;
@@ -436,7 +438,7 @@
     }
 
     const cleanup = () => {
-      stopBackup();
+      stopBackup(false);
       stopWorklet();
       try { sink.disconnect(); } catch (e) {}
     };
@@ -468,13 +470,17 @@
           });
         }
         const chunks = activeChunks();
+        const buffer = toBuffer(chunks);
+        chunks[0].length = 0; chunks[1].length = 0;
         cleanup();
         diag.used = selected;
         lastDiagnostics = { ...diag, at: new Date().toISOString() };
-        return toBuffer(chunks);
+        return buffer;
       },
       cancel() {
         cleanup();
+        wChunks[0].length = 0; wChunks[1].length = 0;
+        bChunks[0].length = 0; bChunks[1].length = 0;
       }
     };
   }
