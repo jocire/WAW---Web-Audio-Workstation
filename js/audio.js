@@ -281,29 +281,32 @@
   const captures = new Map(); // owner id -> capture (keeps its input alive)
 
   /**
-   * Record from an input chain. Two recorders run side by side: the AudioWorklet
-   * recorder (sample-accurate) and a ScriptProcessor backup, because on some
-   * systems the worklet delivers no audio from a real device. stop() returns the
-   * buffer from whichever recorder actually received signal.
-   */
+   * Record from an input chain. Prefer AudioWorklet, but keep a ScriptProcessor
+   * fallback for browser/device combinations where the Worklet does not deliver
+   * input. Both paths overlap only during a short startup probe; the unused path
+   * is disconnected before the take continues.
   async function captureFrom(ti) {
     const ctx = ti.gain.context;
     const diag = {
       device: ti.dev.label, deviceSettings: (() => { try { const s = ti.dev.stream.getAudioTracks()[0].getSettings(); return { sampleRate: s.sampleRate, channelCount: s.channelCount, autoGainControl: s.autoGainControl, echoCancellation: s.echoCancellation }; } catch (e) { return null; } })(),
       trackState: ti.dev.stream.getAudioTracks()[0]?.readyState, trackMuted: ti.dev.stream.getAudioTracks()[0]?.muted,
       ctxRate: ctx.sampleRate, ctxState: ctx.state, baseLatency: ctx.baseLatency, outputLatency: ctx.outputLatency,
-      worklet: false, workletFrames: 0, workletPeak: 0, backupFrames: 0, backupPeak: 0, used: null
+      worklet: false, workletFrames: 0, workletPeak: 0, backupFrames: 0, backupPeak: 0, used: null,
+      recorderProbeMs: 0
     };
-    const sink = ctx.createGain(); sink.gain.value = 0;
+    const sink = ctx.createGain();
+    sink.gain.value = 0;
     sink.connect(ctx.destination);
 
-    // --- AudioWorklet recorder ---
-    await window.WAWFX.ensureWorklets(ctx);
-    const node = window.WAWFX.makeWorklet(ctx, "waw-recorder", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: "explicit" });
-    const wChunks = [[], []];
-    let wStartedAt = null, resolveStop = null;
     const PEAK_BLOCK = 256;
-    const livePeaks = { worklet: [], backup: [] }; // [min, max, min, max, ...]
+    const PROBE_TIMEOUT_MS = 400;
+    const wChunks = [[], []], bChunks = [[], []];
+    const livePeaks = { worklet: [], backup: [] };
+    let node = null, sp = null, bRecording = true;
+    let wStartedAt = null, bStartedAt = null, resolveStop = null;
+    let selected = null, resolveProbe = null, probeTimer = null;
+    const probeStarted = performance.now();
+
     const addPeaks = (arr, d) => {
       for (let i = 0; i < d.length; i += PEAK_BLOCK) {
         let mn = 0, mx = 0;
@@ -312,36 +315,47 @@
         arr.push(mn, mx);
       }
     };
-    if (node) {
-      diag.worklet = true;
-      node.port.onmessage = (e) => {
-        const m = e.data;
-        if (m.type === "started") wStartedAt = m.time;
-        else if (m.type === "data") m.channels.forEach((c, i) => {
-          if (i >= 2) return;
-          wChunks[i].push(c);
-          if (i === 0) { diag.workletFrames += c.length; addPeaks(livePeaks.worklet, c); }
-          for (let k = 0; k < c.length; k += 16) { const v = Math.abs(c[k]); if (v > diag.workletPeak) diag.workletPeak = v; }
-        });
-        else if (m.type === "stopped") resolveStop?.();
-      };
-      ti.gain.connect(node);
-      node.connect(sink);
-      node.port.postMessage({ cmd: "start" });
+    const stopBackup = (discardProbeData = true) => {
+      bRecording = false;
+      if (sp) {
+        try { ti.gain.disconnect(sp); sp.disconnect(); } catch (e) {}
+        sp.onaudioprocess = null;
+        sp = null;
+      }
+      // The backup is needed only during the short compatibility probe.
+      if (discardProbeData) {
+        bChunks[0].length = 0; bChunks[1].length = 0;
+        livePeaks.backup.length = 0;
+      }
+    };
+    const stopWorklet = () => {
+      if (!node) return;
+      try { node.port.postMessage({ cmd: "stop" }); } catch (e) {}
+      try { ti.gain.disconnect(node); node.disconnect(); } catch (e) {}
+      node.port.onmessage = null;
+      node = null;
+    };
+
+    try {
+      const available = await window.WAWFX.ensureWorklets(ctx);
+      if (available) node = window.WAWFX.makeWorklet(ctx, "waw-recorder", {
+        numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
+        channelCount: 2, channelCountMode: "explicit"
+      });
+    } catch (e) {
+      console.warn("WAW recorder Worklet setup failed; using ScriptProcessor fallback.", e);
     }
 
-    // --- ScriptProcessor backup recorder ---
-    const BS = 4096;
-    const sp = ctx.createScriptProcessor ? ctx.createScriptProcessor(BS, 2, 2) : null;
-    const bChunks = [[], []];
-    let bStartedAt = null, bRecording = true;
+    // Keep the legacy path alive only during the short data probe. Worklet
+    // module loading is complete before this overlap begins.
+    try {
+      sp = ctx.createScriptProcessor ? ctx.createScriptProcessor(4096, 2, 2) : null;
+    } catch (e) { sp = null; }
     if (sp) {
       sp.onaudioprocess = (e) => {
-        if (!bRecording) return;
+        if (!bRecording || selected === "worklet") return;
         const ib = e.inputBuffer;
-        // playbackTime is when this block's OUTPUT plays; measured against the
-        // worklet recorder, the input was captured about 3 blocks earlier
-        if (bStartedAt == null) bStartedAt = e.playbackTime - 3 * BS / ctx.sampleRate;
+        if (bStartedAt == null) bStartedAt = e.playbackTime - 3 * 4096 / ctx.sampleRate;
         for (let ch = 0; ch < 2; ch++) {
           const d = new Float32Array(ib.getChannelData(Math.min(ch, ib.numberOfChannels - 1)));
           bChunks[ch].push(d);
@@ -355,43 +369,117 @@
       ti.gain.connect(sp);
       sp.connect(sink);
     }
-    if (!node && !sp) throw new Error("this browser cannot record audio (no AudioWorklet / ScriptProcessor)");
+
+    if (node) {
+      diag.worklet = true;
+      node.port.onmessage = (e) => {
+        const m = e.data;
+        if (m.type === "started") wStartedAt = m.time;
+        else if (m.type === "data") {
+          // The first complete batch is the compatibility probe. After it
+          // arrives, only the Worklet records and the backup buffers are freed.
+          if (selected === "backup") return;
+          if (!selected) {
+            selected = "worklet";
+            diag.recorderProbeMs = Math.round(performance.now() - probeStarted);
+            stopBackup();
+            resolveProbe?.();
+          }
+          m.channels.forEach((c, i) => {
+            if (i >= 2) return;
+            wChunks[i].push(c);
+            if (i === 0) {
+              diag.workletFrames += c.length;
+              addPeaks(livePeaks.worklet, c);
+            }
+            for (let k = 0; k < c.length; k += 16) {
+              const v = Math.abs(c[k]);
+              if (v > diag.workletPeak) diag.workletPeak = v;
+            }
+          });
+        } else if (m.type === "stopped") resolveStop?.();
+      };
+      ti.gain.connect(node);
+      node.connect(sink);
+      node.port.postMessage({ cmd: "start" });
+      await new Promise(resolve => {
+        resolveProbe = resolve;
+        probeTimer = setTimeout(() => {
+          if (!selected) {
+            selected = sp ? "backup" : null;
+            diag.recorderProbeMs = Math.round(performance.now() - probeStarted);
+            stopWorklet();
+          }
+          resolve();
+        }, PROBE_TIMEOUT_MS);
+        // A data message may arrive before the timer is assigned.
+        if (selected) { clearTimeout(probeTimer); resolve(); }
+      });
+      clearTimeout(probeTimer);
+      resolveProbe = null;
+    } else {
+      selected = sp ? "backup" : null;
+    }
+
+    if (!selected) {
+      stopBackup();
+      sink.disconnect();
+      throw new Error("this browser cannot record audio (no working AudioWorklet / ScriptProcessor)");
+    }
+    if (selected === "backup") {
+      // Worklet did not deliver its first batch in time. Keep the backup as the
+      // sole recorder for this take; do not retain a second full recording.
+      stopWorklet();
+      diag.used = "backup";
+    } else {
+      diag.used = "worklet";
+    }
 
     const cleanup = () => {
-      bRecording = false;
-      try { if (node) ti.gain.disconnect(node); } catch (e) {}
-      try { if (sp) ti.gain.disconnect(sp); } catch (e) {}
-      try { node?.disconnect(); sp?.disconnect(); sink.disconnect(); } catch (e) {}
-      if (sp) sp.onaudioprocess = null;
+      stopBackup(false);
+      stopWorklet();
+      try { sink.disconnect(); } catch (e) {}
     };
     const toBuffer = (chunks) => {
       const len = chunks[0].reduce((a, c) => a + c.length, 0);
       if (!len) return null;
       const buf = new AudioBuffer({ numberOfChannels: 2, length: len, sampleRate: ctx.sampleRate });
       for (let ch = 0; ch < 2; ch++) {
-        const d = new Float32Array(len); let o = 0;
+        const d = new Float32Array(len);
+        let o = 0;
         (chunks[ch].length ? chunks[ch] : chunks[0]).forEach(c => { d.set(c, o); o += c.length; });
         buf.copyToChannel(d, ch);
       }
       return buf;
     };
-    // the worklet wins unless it got (nearly) nothing while the backup heard signal
-    const useBackup = () => !diag.workletFrames || (diag.workletPeak < 1e-4 && diag.backupPeak > 1e-3);
+    const activeChunks = () => selected === "backup" ? bChunks : wChunks;
+    const activePeaks = () => selected === "backup" ? livePeaks.backup : livePeaks.worklet;
     return {
       diag,
-      /** waveform of what has been captured so far: { peaks:[min,max,...], block, rate } */
-      live() { return { peaks: useBackup() ? livePeaks.backup : livePeaks.worklet, block: PEAK_BLOCK, rate: ctx.sampleRate }; },
-      get startedAt() { return useBackup() ? bStartedAt : wStartedAt; },
-      get peak() { return useBackup() ? diag.backupPeak : diag.workletPeak; },
+      live() { return { peaks: activePeaks(), block: PEAK_BLOCK, rate: ctx.sampleRate }; },
+      get startedAt() { return selected === "backup" ? bStartedAt : wStartedAt; },
+      get peak() { return selected === "backup" ? diag.backupPeak : diag.workletPeak; },
       async stop() {
-        if (node) await new Promise(res => { resolveStop = res; node.port.postMessage({ cmd: "stop" }); setTimeout(res, 500); });
+        if (selected === "worklet" && node) {
+          await new Promise(res => {
+            resolveStop = res;
+            node.port.postMessage({ cmd: "stop" });
+            setTimeout(res, 500);
+          });
+        }
+        const chunks = activeChunks();
+        const buffer = toBuffer(chunks);
+        chunks[0].length = 0; chunks[1].length = 0;
         cleanup();
-        const backup = useBackup();
-        diag.used = backup ? "backup" : "worklet";
+        diag.used = selected;
         lastDiagnostics = { ...diag, at: new Date().toISOString() };
-        return toBuffer(backup ? bChunks : wChunks);
+        return buffer;
       },
-      cancel() { if (node) node.port.postMessage({ cmd: "stop" }); cleanup(); }
+      cancel() {
+        cleanup();
+        wChunks[0].length = 0; wChunks[1].length = 0;
+        bChunks[0].length = 0; bChunks[1].length = 0;
+      }
     };
   }
   let lastDiagnostics = null;
