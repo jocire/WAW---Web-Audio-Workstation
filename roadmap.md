@@ -165,9 +165,10 @@ the results are recorded.
 These are observations from reading the current source, not runtime measurements or
 proof that users are experiencing audible faults.
 
-- `js/audio.js` starts the AudioWorklet recorder and ScriptProcessor backup together
-  whenever both APIs are available. It retains both recordings and chooses one only
-  when stopping. This duplicates capture work and temporary audio storage.
+- Before the recorder refactor on this branch, `js/audio.js` retained both the
+  AudioWorklet and ScriptProcessor recordings for the entire take. The branch now
+  limits overlap to a 400 ms startup data probe, then disconnects and discards the
+  unused recorder. This code change still needs browser/device regression testing.
 - `js/worklets.js` copies every input render block with `slice()`, batches those copies,
   then allocates merged channel buffers and copies the batches again during flush.
   `js/audio.js` also retains the ScriptProcessor chunks and live waveform peak arrays
@@ -183,8 +184,11 @@ proof that users are experiencing audible faults.
   sidechain input from another track.
 
 ### Audio-engine hardening
-- [ ] Refactor `captureFrom()` so the AudioWorklet is the normal path and ScriptProcessor
-  starts only as a fallback when needed; the current code runs both paths concurrently.
+- [x] Implemented in this branch: `captureFrom()` prefers AudioWorklet and keeps
+  ScriptProcessor only during a 400 ms startup data probe; after the first Worklet batch,
+  the fallback is disconnected and its probe buffers are discarded. If the Worklet does
+  not deliver a batch, ScriptProcessor becomes the sole recorder. Runtime verification
+  on real browser/device combinations remains open.
 - [ ] Reduce recorder copies/allocations: profile the Worklet's per-render-block `slice()`,
   batch flush consolidation, ScriptProcessor copies and live-peak accumulation. Consider
   transferable buffer pools or a preallocated ring buffer if measurements justify them.
@@ -194,9 +198,10 @@ proof that users are experiencing audible faults.
   recoverable project store instead of retaining every chunk until Stop.
 
 #### Recorder refactor acceptance criteria
-- [ ] Choose the capture implementation deterministically; do not retain two complete
-  recordings for the full duration of a normal take. If a startup compatibility probe is
-  needed, keep it short and document how silent inputs are handled.
+- [x] Code now chooses one recorder for the take after a 400 ms startup probe and never
+  retains two full-length recordings. The probe tests delivery of audio blocks, not signal
+  loudness, so a legitimately silent microphone does not trigger fallback. Runtime tests
+  for silent and active inputs remain open.
 - [ ] Preserve sample counts and channel alignment across start, stop, cancellation and
   fallback; test mono devices, stereo devices and multiple armed tracks.
 - [ ] Keep waveform preview independent from ownership of the recorded audio buffers.
