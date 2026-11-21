@@ -278,9 +278,9 @@ proof that users are experiencing audible faults.
   after the change shift (same as most DAWs).
 - Real USB-microphone capture was verified only with simulated devices in this
   environment; please report the input meter readings if a device stays silent.
-- Recording currently runs the AudioWorklet and ScriptProcessor capture paths in parallel
-  when both are available, then selects one at Stop. This is a source-level observation
-  awaiting a refactor and real-device regression tests.
+- Recorder capture now prefers AudioWorklet and uses ScriptProcessor only during a
+  400 ms startup data-delivery probe. The unused path is disconnected and discarded;
+  runtime regression testing on real browser/device combinations remains open.
 - The Limiter is currently a high-ratio compressor followed by a hard-clipping WaveShaper;
   it is not a lookahead or guaranteed true-peak limiter.
 - The Bus Compressor's SC HPF is an internal frequency-dependent compression approximation,
@@ -294,8 +294,10 @@ proof that users are experiencing audible faults.
 ## Next
 
 ### Near term — reliability before feature expansion
-1. **Recorder efficiency and integrity:** remove normal-path dual capture, reduce
-   per-block copies, bound long-take memory, add overrun detection and long-recording tests.
+1. **Recorder efficiency and integrity:** reduce per-block copies, bound long-take
+   memory, add overrun detection and long-recording tests, and verify sample/channel
+   integrity, cancellation and cleanup across browser/device combinations. The initial
+   single-recorder selection refactor is implemented on the current branch.
 2. **Performance harness:** add repeatable multi-track playback/recording scenarios and
    publish measured CPU, memory, scheduler-lateness and dropout results.
 3. **Audio lifecycle and device resilience:** audit voices/nodes and test context resume,
