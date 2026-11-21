@@ -160,13 +160,38 @@ architecture review. They are **not claims that these problems have been reprodu
 Keep each item open until it has been tested on real browser/device combinations and
 the results are recorded.
 
+### Static source-review findings (2026-11-21)
+
+These are observations from reading the current source, not runtime measurements or
+proof that users are experiencing audible faults.
+
+- `js/audio.js` starts the AudioWorklet recorder and ScriptProcessor backup together
+  whenever both APIs are available. It retains both recordings and chooses one only
+  when stopping. This duplicates capture work and temporary audio storage.
+- `js/worklets.js` copies every input render block with `slice()`, batches those copies,
+  then allocates merged channel buffers and copies the batches again during flush.
+  `js/audio.js` also retains the ScriptProcessor chunks and live waveform peak arrays
+  until the take is stopped. Long takes and multiple armed tracks therefore need
+  explicit memory/GC profiling and a bounded-storage strategy.
+- The recorder's main-thread chunk arrays grow for the duration of a take; the current
+  path does not stream completed audio blocks directly to persistent storage.
+- `js/fx.js` implements the Limiter as a high-ratio DynamicsCompressor followed by a
+  4x-oversampled WaveShaper hard ceiling. This is not a lookahead limiter and does not
+  establish a guaranteed true-peak ceiling.
+- The Bus Compressor's `SC HPF` option filters the signal feeding its built-in
+  compressor and blends a low-passed component around it. It is not an external
+  sidechain input from another track.
+
 ### Audio-engine hardening
-- [ ] Keep AudioWorklet as the normal recording path and use ScriptProcessor only as a
-  compatibility fallback; verify that both paths are never capturing the same stream.
-- [ ] Profile recorder buffer copies and allocations during long recordings; consider a
-  preallocated ring buffer or buffer pool if profiling shows avoidable GC pressure.
-- [ ] Define bounded buffering and backpressure behavior. Detect overruns and surface a
-  warning rather than silently losing or truncating recorded audio.
+- [ ] Refactor `captureFrom()` so the AudioWorklet is the normal path and ScriptProcessor
+  starts only as a fallback when needed; the current code runs both paths concurrently.
+- [ ] Reduce recorder copies/allocations: profile the Worklet's per-render-block `slice()`,
+  batch flush consolidation, ScriptProcessor copies and live-peak accumulation. Consider
+  transferable buffer pools or a preallocated ring buffer if measurements justify them.
+- [ ] Bound memory use for long takes and simultaneous armed tracks. Define buffering,
+  backpressure and storage behavior; detect overruns and warn rather than silently losing
+  or truncating audio. Evaluate streaming completed chunks to IndexedDB or another
+  recoverable project store instead of retaining every chunk until Stop.
 - [ ] Stress the lookahead scheduler during main-thread stalls, background-tab throttling,
   dense MIDI passages, loop boundaries and tempo-map changes; measure late or missed events.
 - [ ] Audit voice and audio-node lifecycle: stuck notes, voice stealing, disconnects,
@@ -197,8 +222,11 @@ the results are recorded.
 - [ ] Add multitrack MIDI export and stem export.
 - [ ] Add sidechain routing and bus/master/instrument automation.
 - [ ] Add loudness (LUFS) and true-peak metering.
-- [ ] Review the current limiter implementation with level-matched tests. Do not describe
-  it as transparent lookahead or true-peak limiting unless those properties are verified.
+- [ ] Review the current compressor-plus-hard-clip Limiter with level-matched tests;
+  determine whether to rename it or replace it with a real lookahead design. Do not
+  describe it as transparent lookahead or true-peak limiting unless verified.
+- [ ] Clarify the Bus Compressor's `SC HPF` label and document that it is not an external
+  sidechain input; implement true track-to-track sidechain routing separately.
 - [ ] Document the absence of native VST3/AU hosting. A future browser instrument/FX module
   API is a separate extension mechanism, not native plugin compatibility.
 
@@ -233,6 +261,13 @@ the results are recorded.
   after the change shift (same as most DAWs).
 - Real USB-microphone capture was verified only with simulated devices in this
   environment; please report the input meter readings if a device stays silent.
+- Recording currently runs the AudioWorklet and ScriptProcessor capture paths in parallel
+  when both are available, then selects one at Stop. This is a source-level observation
+  awaiting a refactor and real-device regression tests.
+- The Limiter is currently a high-ratio compressor followed by a hard-clipping WaveShaper;
+  it is not a lookahead or guaranteed true-peak limiter.
+- The Bus Compressor's SC HPF is an internal frequency-dependent compression approximation,
+  not an external sidechain input from another track.
 - Recording latency compensation uses the browser-reported latency plus a manual offset;
   calibrate per device in the sidebar (Audio Input → Latency offset).
 - Samples live in the browser's IndexedDB; clearing site data deletes them unless the
@@ -242,8 +277,8 @@ the results are recorded.
 ## Next
 
 ### Near term — reliability before feature expansion
-1. **Recorder efficiency and integrity:** confirm one active capture path, profile copies
-   and allocations, add bounded buffering, overrun detection and long-recording tests.
+1. **Recorder efficiency and integrity:** remove normal-path dual capture, reduce
+   per-block copies, bound long-take memory, add overrun detection and long-recording tests.
 2. **Performance harness:** add repeatable multi-track playback/recording scenarios and
    publish measured CPU, memory, scheduler-lateness and dropout results.
 3. **Audio lifecycle and device resilience:** audit voices/nodes and test context resume,
